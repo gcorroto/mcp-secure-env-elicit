@@ -193,11 +193,20 @@ export function createSecretRequestService(deps: SecretRequestServiceDeps): Secr
       }
 
       // The client reported the flow finished; give the browser POST a brief
-      // moment to land before giving up (submit and CLI-confirm can race).
+      // moment to land (submit and CLI-confirm can race). Bounded: an accept
+      // without a submit must not hold the serialized prompt queue for the
+      // whole sign-in window — the token stays redeemable either way, so a
+      // late submit still lands in the vault for the next retry.
       if (first.kind === 'elicit' && first.action === 'accept') {
+        const grace = new Promise<'grace'>((resolve) => {
+          setTimeout(() => {
+            resolve('grace');
+          }, Math.min(15_000, requestTimeoutMs)).unref();
+        });
         const late = await Promise.race([
           valuesArrived.then(() => ({ kind: 'values' as const })),
           timedOut.then(() => ({ kind: 'timeout' as const })),
+          grace.then(() => ({ kind: 'grace' as const })),
         ]);
         if (late.kind === 'values') {
           trace(`values received for '${serverName}' after confirm`);

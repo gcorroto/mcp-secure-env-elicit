@@ -100,11 +100,15 @@ export async function generateSelfSignedCert(
   const pems = await generate([{ name: 'commonName', value: host }], {
     keySize: 2048,
     algorithm: 'sha256',
-    // Ten years: a stable certificate is what makes "trust it once in the OS
-    // store" a workable way to silence the browser warning.
-    notAfterDate: new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000),
+    // 825 days is the maximum Apple accepts for locally-trusted TLS certs
+    // (mkcert uses the same bound); long enough that "trust it once in the OS
+    // store" remains a workable way to silence the browser warning.
+    notAfterDate: new Date(Date.now() + 825 * 24 * 60 * 60 * 1000),
     extensions: [
       { name: 'basicConstraints', cA: false },
+      // Browsers require a serverAuth EKU on locally-trusted certificates.
+      { name: 'keyUsage', digitalSignature: true, keyEncipherment: true },
+      { name: 'extKeyUsage', serverAuth: true },
       { name: 'subjectAltName', altNames },
     ],
   });

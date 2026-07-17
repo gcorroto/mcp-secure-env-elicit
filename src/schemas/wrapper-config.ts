@@ -20,8 +20,9 @@ const SecretMetaSchema = z
   })
   .strict();
 
-const ChildServerSchema = z
+const StdioServerSchema = z
   .object({
+    type: z.literal('stdio'),
     command: z.string().min(1).describe('Executable to spawn, e.g. "npx" or "node".'),
     args: z.array(z.string()).default([]),
     env: z.record(z.string().min(1), z.string()).default({}),
@@ -30,6 +31,65 @@ const ChildServerSchema = z
     autoStart: z.boolean().default(false),
   })
   .strict();
+
+/**
+ * A remote URL that may embed `${secure:…}` placeholders anywhere — including
+ * the host or port, which the WHATWG parser would reject verbatim. Validate
+ * with placeholders masked, and pin the scheme so typos fail at config load
+ * instead of as an opaque connect-time fetch error.
+ */
+const RemoteUrlSchema = z
+  .string()
+  .min(1)
+  .superRefine((value, ctx) => {
+    const masked = value.replace(/\$\{secure:[^}]+\}/g, '1');
+    let parsed: URL;
+    try {
+      parsed = new URL(masked);
+    } catch {
+      ctx.addIssue({ code: 'custom', message: `Invalid URL: '${value}'` });
+      return;
+    }
+
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      ctx.addIssue({
+        code: 'custom',
+        message: `URL must use http(s), got '${parsed.protocol.replace(/:$/, '')}' in '${value}'`,
+      });
+    }
+  });
+
+const RemoteServerSchema = z
+  .object({
+    /**
+     * `http`/`https` try Streamable HTTP first and fall back to SSE; `sse`
+     * forces the (legacy) SSE transport.
+     */
+    type: z.enum(['http', 'https', 'sse']),
+    url: RemoteUrlSchema,
+    /** HTTP headers sent on every request; values may hold placeholders. */
+    headers: z.record(z.string().min(1), z.string()).default({}),
+    /**
+     * Accept a server certificate that is not publicly trusted (self-signed
+     * or internal CA). Applies to this server's requests only.
+     */
+    insecureTls: z.boolean().default(false),
+    /** Start this server as soon as the wrapper's MCP client connects. */
+    autoStart: z.boolean().default(false),
+  })
+  .strict();
+
+// `type` is optional for backwards compatibility, but only for entries that
+// look like stdio servers (they have `command`): a remote-shaped entry that
+// forgot its `type` should get the union's clear "expected 'stdio' | 'http' |
+// 'https' | 'sse'" error, not stdio's "unrecognized key: url".
+const ChildServerSchema = z.preprocess(
+  (value) =>
+    typeof value === 'object' && value !== null && !('type' in value) && 'command' in value
+      ? { ...value, type: 'stdio' }
+      : value,
+  z.discriminatedUnion('type', [StdioServerSchema, RemoteServerSchema]),
+);
 
 const TlsConfigSchema = z
   .object({
@@ -57,4 +117,6 @@ export const WrapperConfigSchema = z
 
 export type WrapperConfig = z.infer<typeof WrapperConfigSchema>;
 export type ChildServerConfig = z.infer<typeof ChildServerSchema>;
+export type StdioServerConfig = z.infer<typeof StdioServerSchema>;
+export type RemoteServerConfig = z.infer<typeof RemoteServerSchema>;
 export type SecretMeta = z.infer<typeof SecretMetaSchema>;

@@ -17,12 +17,30 @@
         "PLANKA_AGENT_EMAIL": "${secure:PLANKA_EMAIL:email}",
         "PLANKA_AGENT_PASSWORD": "${secure:PLANKA_PASSWORD}"
       }
+    },
+    "sonarqube": {
+      "type": "https",
+      "url": "https://tools.example.com/sonar-mcp-server/mcp",
+      "headers": {
+        "SONARQUBE_TOKEN": "${secure:SONARQUBE_TOKEN}"
+      },
+      "insecureTls": true
+    },
+    "db-sse": {
+      "type": "sse",
+      "url": "https://tools.example.com/mcp-sse-db/sse",
+      "headers": {
+        "X-Api-Key": "${secure:DB_API_KEY}"
+      },
+      "insecureTls": true
     }
   },
   "secrets": {
     "ORACLE_USER": { "description": "Oracle schema user", "input": "text" },
     "ORACLE_PASSWORD": { "description": "Oracle schema password" },
     "PLANKA_EMAIL": { "description": "Planka agent account email" },
-    "PLANKA_PASSWORD": { "description": "Planka agent account password" }
+    "PLANKA_PASSWORD": { "description": "Planka agent account password" },
+    "SONARQUBE_TOKEN": { "description": "SonarQube user token (squ_…)" },
+    "DB_API_KEY": { "description": "API key for the SSE database MCP" }
   }
 }

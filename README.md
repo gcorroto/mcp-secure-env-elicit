@@ -59,9 +59,36 @@ MCP client configs (`mcp.json`, `claude_desktop_config.json`, …) are plain-tex
 - Submitted values go straight from the browser form into the encrypted in-memory vault over loopback HTTPS. They never travel through the MCP protocol, so neither the model nor the client ever sees them.
 - Values live for the **lifetime of the process**: restart your MCP client and you will be asked again (that is the price of never persisting them).
 
+## Remote servers (HTTP / SSE)
+
+Not every MCP server is a local process. Entries with a `type` of `http`, `https`, or `sse` connect to a **remote** MCP endpoint instead of spawning one, and their `headers` (and even the `url`) accept the same placeholders:
+
+```json
+{
+  "servers": {
+    "sonarqube": {
+      "type": "https",
+      "url": "https://tools.example.com/sonar-mcp-server/mcp",
+      "headers": { "SONARQUBE_TOKEN": "${secure:SONARQUBE_TOKEN}" }
+    },
+    "db": {
+      "type": "sse",
+      "url": "https://tools.example.com/mcp-sse-db/sse",
+      "headers": { "X-Api-Key": "${secure:DB_API_KEY}" },
+      "insecureTls": true
+    }
+  }
+}
+```
+
+- `http` / `https` use the modern **Streamable HTTP** transport and automatically fall back to SSE if the endpoint turns out to be a legacy one — so `"type": "https"` works for both kinds without you having to know.
+- `sse` forces the legacy SSE transport (headers are sent on the stream request too).
+- `insecureTls: true` accepts a server certificate that is not publicly trusted (self-signed or internal CA), scoped to that server's requests only — the equivalent of npm's `strict-ssl=false` for your internal tooling host.
+- No `type` (or `"type": "stdio"`) keeps the spawn behaviour: `command`, `args`, `env`, `cwd`.
+
 ## Placeholders
 
-`${secure:NAME}` anywhere inside `env` values or `args` strings — including embedded in larger strings (connection URLs, DSNs). The same `NAME` used across several servers is asked **once** and shared.
+`${secure:NAME}` anywhere inside `env` values or `args` strings for stdio servers, and inside `headers` values or the `url` for remote ones — including embedded in larger strings (connection URLs, DSNs, `Bearer …` prefixes). The same `NAME` used across several servers is asked **once** and shared.
 
 Optionally pick the form widget: `${secure:NAME:type}` with `text`, `password`, `email`, `number`, `url` or `tel`. Types can also be set in the `secrets` metadata (`"input": "email"`). When nothing is explicit, the widget is inferred from the name: variables matching `PASSWORD`, `PASS`, `PWD`, `SECRET`, `TOKEN`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `CREDENTIAL`, `AUTH` render as password inputs; names containing `MAIL` render as email inputs.
 
@@ -69,8 +96,9 @@ Optionally pick the form widget: `${secure:NAME:type}` with `text`, `password`, 
 
 The form is deliberately **autofill-friendly**: every input has a stable `name`/`id` (the variable name itself) and a real `autocomplete` token — no `autocomplete="off"` anywhere. That means your browser (or password manager) offers to save what you submit and proposes it again the next time the same server asks, so re-entering values after a restart is usually two clicks.
 
-Two things keep autofill working:
+Three things keep autofill working:
 
+- **A trusted certificate.** Browsers refuse to *save* passwords on pages with certificate errors — if the padlock is broken, Chrome silently skips the "save password?" prompt. Follow the [Trusted TLS](#trusted-tls-no-browser-warning) section once and saving starts working.
 - **A stable port.** The browser keys saved values on the page origin (scheme + host + port). The default port is `48910`; if it is busy the wrapper falls back to an ephemeral port for that run (and saved values will not be offered). Override with the `PORT` env var.
 - **A stable URL path.** The form always lives at `/auth`; the token travels in the query string, which does not affect autofill.
 
@@ -93,17 +121,29 @@ The sign-in page ships with several looks: `light` (default), `dark`, `ocean`, `
 
 ## Trusted TLS (no browser warning)
 
-The sign-in page must be HTTPS (MCP clients only open `https:` URLs for URL elicitation). Out of the box the wrapper uses a self-signed certificate, which the browser flags once. Three ways to make it trusted:
+The sign-in page must be HTTPS (MCP clients only open `https:` URLs for URL elicitation). Out of the box the wrapper generates a **self-signed** certificate — the browser cannot verify who signed it, so it shows "your connection is not private" and, more annoyingly, **refuses to save your passwords** while the certificate is untrusted.
 
-1. **Trust the generated certificate once.** It is persisted at `~/.mcp-secure-env-elicit/tls/cert.pem` (stable across runs, 10-year validity). Import it into your OS trust store and the warning is gone:
-   - **Windows:** `certutil -addstore -user Root "%USERPROFILE%\.mcp-secure-env-elicit\tls\cert.pem"`
-   - **macOS:** `security add-trusted-cert -k ~/Library/Keychains/login.keychain-db ~/.mcp-secure-env-elicit/tls/cert.pem`
+The certificate is persisted at `~/.mcp-secure-env-elicit/tls/cert.pem` — stable across runs, 825-day validity, proper `serverAuth` usage — precisely so you can trust it **once** and be done. Pick one of these, in increasing order of effort:
+
+1. **Trust the generated certificate (2 minutes, recommended).** Import it into your OS trust store, restart the browser, and the padlock turns green:
+   - **Windows** (a confirmation dialog pops up — accept it):
+     ```
+     certutil -addstore -user Root "%USERPROFILE%\.mcp-secure-env-elicit\tls\cert.pem"
+     ```
+   - **macOS:**
+     ```
+     security add-trusted-cert -k ~/Library/Keychains/login.keychain-db ~/.mcp-secure-env-elicit/tls/cert.pem
+     ```
    - **Linux (Debian/Ubuntu):** copy it under `/usr/local/share/ca-certificates/` (as `.crt`) and run `sudo update-ca-certificates`
+
+   Why this works: "insecure" only means "signed by someone the OS does not know". Adding the certificate to your user's trusted store makes *you* the authority that vouches for it — reasonable here because the key never leaves your machine and the server only listens on `127.0.0.1`.
 2. **Use [mkcert](https://github.com/FiloSottile/mkcert).** `mkcert -install && mkcert 127.0.0.1 localhost` mints a locally-trusted pair; point the config at it:
    ```json
    { "tls": { "certPath": "C:/certs/127.0.0.1+1.pem", "keyPath": "C:/certs/127.0.0.1+1-key.pem" } }
    ```
-3. **Use your own domain.** Point a real DNS name (e.g. `secure-env.yourdomain.com`) at `127.0.0.1`, get a real certificate for it (Let's Encrypt DNS-01 works fine for loopback names), set `HOST=secure-env.yourdomain.com` and the `tls` paths. Fully green padlock.
+3. **Use your own domain.** Point a real DNS name (e.g. `secure-env.yourdomain.com`) at `127.0.0.1`, get a real certificate for it (Let's Encrypt DNS-01 works fine for loopback names), set `HOST=secure-env.yourdomain.com` and the `tls` paths. Fully green padlock with zero trust-store changes on any machine.
+
+To verify after trusting: reopen the sign-in page — no warning, and after your first submit the browser offers to save the values.
 
 ## Configuration reference
 
@@ -112,22 +152,25 @@ The sign-in page must be HTTPS (MCP clients only open `https:` URLs for URL elic
 | `--config <path>` / `MCP_SECURE_ENV_CONFIG` | Config file location. Defaults: `./mcp-secure-env.config.json`, then `~/.mcp-secure-env-elicit/config.json`. |
 | `--theme <name>` / `MCP_SECURE_ENV_THEME` / `"theme"` | Sign-in page theme. |
 | `HOST` / `PORT` | Loopback server binding. Defaults `127.0.0.1:48910`. Keep the port stable for browser autofill. |
-| `"servers"` | `command`, `args`, `env` (with placeholders), optional `cwd`, optional `autoStart`. Server names cannot contain `_`. |
+| `"servers"` (stdio) | `command`, `args`, `env` (with placeholders), optional `cwd`, optional `autoStart`. Server names cannot contain `_`. |
+| `"servers"` (remote) | `type` (`http`/`https`/`sse`), `url`, `headers` (with placeholders), optional `insecureTls`, optional `autoStart`. |
 | `"secrets"` | Optional per-secret `description` and `input`. |
 | `"tls"` | Optional `certPath`/`keyPath` for a trusted certificate. |
+
+Note on `autoStart`: servers whose secrets are still missing are **not** prompted at boot — a wrapper hosts many servers and asking for everything on startup would be a wall of prompts. They wait quietly and elicit when first started (`secure_env_start`).
 
 ## Security model, honestly
 
 - Secret values are held AES-256-GCM encrypted in the wrapper's memory, under a key minted per process. They are decrypted only at spawn time, directly into the child's environment.
 - Nothing is ever written to disk by the wrapper except TLS material (which contains no secrets).
 - Values never enter the MCP conversation: there is deliberately **no** "set secret" tool, so the model cannot be handed a secret even by accident. The only input path is the loopback form.
+- Error messages are **redacted**: transport and fetch errors can echo the request URL or upstream response bodies, so every secret value (plain and percent-encoded) is scrubbed to `[secret]` before an error reaches stderr, `secure_env_status`, or a tool result. There is a regression test for it.
 - The child process receives the secrets as plain environment variables — that is the contract of the servers being wrapped. Anyone able to inspect the child's environment (same OS user) can read them, exactly as if you had configured the server directly.
 - Prefer placeholders in `env` over `args`: command lines are visible in process listings.
 
 ## Limitations
 
 - Only **tools** are proxied for now (no resources or prompts).
-- Wrapped servers must speak **stdio**.
 
 ## Development
 

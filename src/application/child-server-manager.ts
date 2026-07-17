@@ -3,10 +3,25 @@ import {
   getDefaultEnvironment,
   StdioClientTransport,
 } from '@modelcontextprotocol/sdk/client/stdio.js';
+// SSE is deprecated in the spec but still what many deployed servers speak;
+// a wrapper has to meet servers where they are.
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { type Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { type FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { Agent, fetch as undiciFetch } from 'undici';
 
-import { type WrapperConfig } from '../schemas/wrapper-config.js';
+import {
+  type RemoteServerConfig,
+  type StdioServerConfig,
+  type WrapperConfig,
+} from '../schemas/wrapper-config.js';
 import { resolveInputType } from './input-type.js';
-import { collectSecretReferences, resolveServerTemplates } from './placeholders.js';
+import {
+  collectSecretReferences,
+  resolveRemoteTemplates,
+  resolveStdioTemplates,
+} from './placeholders.js';
 import {
   type SecretField,
   type SecretRequestService,
@@ -24,6 +39,7 @@ export type ChildState = 'stopped' | 'starting' | 'running' | 'error';
 export interface ChildStatus {
   name: string;
   state: ChildState;
+  transport: 'stdio' | 'http' | 'https' | 'sse';
   autoStart: boolean;
   /** Names (never values) of secrets still missing from the vault. */
   missingSecrets: string[];
@@ -81,12 +97,45 @@ function trace(message: string): void {
   process.stderr.write(`[secure-env] ${message}\n`);
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Remove every secret VALUE from a message before it can reach stderr, the
+ * status output, or an error surfaced to the MCP client. Underlying fetch and
+ * SDK errors embed the request URL (and sometimes the upstream response
+ * body), either of which may carry resolved `${secure:…}` values — plain or
+ * percent-encoded.
+ */
+function redactSecrets(message: string, values: readonly string[]): string {
+  return values
+    .filter((value) => value.length > 0)
+    .reduce(
+      (out, value) =>
+        out.split(value).join('[secret]').split(encodeURIComponent(value)).join('[secret]'),
+      message,
+    );
+}
+
 export function createChildServerManager(deps: ChildServerManagerDeps): ChildServerManager {
   const { config, vault, secretRequests } = deps;
   const runtimes = new Map<string, ChildRuntime>();
   for (const name of Object.keys(config.servers)) {
     runtimes.set(name, { state: 'stopped' });
   }
+
+  // Shared dispatcher for servers with `insecureTls`; closed on stopAll.
+  let insecureDispatcher: Agent | undefined;
+  const insecureFetch = (): FetchLike => {
+    insecureDispatcher ??= new Agent({ connect: { rejectUnauthorized: false } });
+    const dispatcher = insecureDispatcher;
+    return ((url: string | URL, init?: RequestInit) =>
+      undiciFetch(url, {
+        ...(init as Parameters<typeof undiciFetch>[1]),
+        dispatcher,
+      })) as unknown as FetchLike;
+  };
 
   const runtime = (name: string): ChildRuntime => {
     const entry = runtimes.get(name);
@@ -97,6 +146,24 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     }
 
     return entry;
+  };
+
+  const secretNamesFor = (name: string): string[] => {
+    const server = config.servers[name];
+    return server === undefined
+      ? []
+      : collectSecretReferences(server).map((reference) => reference.name);
+  };
+
+  /** The revealed secret values for a server, for redaction. Empty when some
+   * are missing (nothing revealed — and then nothing can leak either). */
+  const secretValuesFor = (name: string): string[] => {
+    const names = secretNamesFor(name);
+    if (vault.missing(names).length > 0) {
+      return [];
+    }
+
+    return Object.values(vault.reveal(names));
   };
 
   const secretFieldsFor = (name: string): SecretField[] => {
@@ -119,6 +186,88 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     deps.onToolsChanged?.();
   };
 
+  const newClient = (): Client =>
+    new Client(
+      { name: 'mcp-secure-env-elicit', version: deps.clientVersion ?? '0.0.0' },
+      { capabilities: {} },
+    );
+
+  /** Connect a fresh client over `transport`, closing it on failure. */
+  const connectWith = async (transport: Transport): Promise<Client> => {
+    const client = newClient();
+    try {
+      await client.connect(transport);
+      return client;
+    } catch (error: unknown) {
+      await client.close().catch(() => undefined);
+      throw error;
+    }
+  };
+
+  const connectStdio = (
+    server: StdioServerConfig,
+    revealed: Record<string, string>,
+  ): Promise<Client> => {
+    // Decrypted values go straight into the spawn call.
+    const resolved = resolveStdioTemplates(server, revealed);
+
+    return connectWith(
+      new StdioClientTransport({
+        command: server.command,
+        args: resolved.args,
+        env: { ...getDefaultEnvironment(), ...resolved.env },
+        ...(server.cwd === undefined ? {} : { cwd: server.cwd }),
+      }),
+    );
+  };
+
+  const connectRemote = async (
+    name: string,
+    server: RemoteServerConfig,
+    revealed: Record<string, string>,
+    secretValues: readonly string[],
+  ): Promise<Client> => {
+    const resolved = resolveRemoteTemplates(server, revealed);
+    const url = new URL(resolved.url);
+    const options = {
+      requestInit: { headers: resolved.headers },
+      ...(server.insecureTls ? { fetch: insecureFetch() } : {}),
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-deprecated
+    const sse = (): Transport => new SSEClientTransport(url, options);
+    // StreamableHTTPClientTransport declares `sessionId: string | undefined`
+    // where Transport says `sessionId?: string`; under
+    // exactOptionalPropertyTypes that is not assignable, so cast at the SDK
+    // boundary.
+    const streamable = (): Transport =>
+      new StreamableHTTPClientTransport(url, options) as unknown as Transport;
+
+    if (server.type === 'sse') {
+      return connectWith(sse());
+    }
+
+    // `http`/`https`: modern transport first, SSE as a compatibility fallback
+    // (the MCP-recommended client behaviour during the migration period).
+    let primaryFailure: string;
+    try {
+      return await connectWith(streamable());
+    } catch (error: unknown) {
+      primaryFailure = redactSecrets(errorMessage(error), secretValues);
+      trace(`streamable http failed for '${name}' (${primaryFailure}); falling back to SSE`);
+    }
+
+    try {
+      return await connectWith(sse());
+    } catch (error: unknown) {
+      // Surface both attempts: the streamable error usually carries the real
+      // root cause (bad token, TLS, DNS), the SSE one just echoes it worse.
+      throw new Error(
+        `Streamable HTTP: ${primaryFailure}; SSE fallback: ${redactSecrets(errorMessage(error), secretValues)}`,
+      );
+    }
+  };
+
   const spawn = async (name: string): Promise<StartResult> => {
     const server = config.servers[name];
     if (server === undefined) {
@@ -126,34 +275,51 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     }
 
     const entry = runtime(name);
-    const secretNames = collectSecretReferences(server).map((reference) => reference.name);
-    // Decrypt at the last possible moment, straight into the spawn call.
-    const resolved = resolveServerTemplates(server, vault.reveal(secretNames));
-
-    const client = new Client(
-      { name: 'mcp-secure-env-elicit', version: deps.clientVersion ?? '0.0.0' },
-      { capabilities: {} },
-    );
-    const transport = new StdioClientTransport({
-      command: server.command,
-      args: resolved.args,
-      env: { ...getDefaultEnvironment(), ...resolved.env },
-      ...(server.cwd === undefined ? {} : { cwd: server.cwd }),
-    });
+    // Decrypt once, at the last possible moment; the values double as the
+    // redaction list for every error path below.
+    const revealed = vault.reveal(secretNamesFor(name));
+    const secretValues = Object.values(revealed);
 
     try {
-      await client.connect(transport);
-      const { tools } = await client.listTools();
-      entry.state = 'running';
-      entry.client = client;
-      entry.tools = tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-      }));
+      const client =
+        server.type === 'stdio'
+          ? await connectStdio(server, revealed)
+          : await connectRemote(name, server, revealed, secretValues);
+
+      try {
+        const { tools } = await client.listTools();
+        entry.state = 'running';
+        entry.client = client;
+        entry.tools = tools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+        }));
+      } catch (error: unknown) {
+        await client.close().catch(() => undefined);
+        throw error;
+      }
+
+      // A child that dies on its own (crashed process, dropped connection)
+      // must not stay 'running': mark it, drop its tools, and let a later
+      // secure_env_start reconnect it. A deliberate stop() clears
+      // entry.client first, so the guard keeps this from firing then.
+      client.onclose = () => {
+        if (entry.client !== client) {
+          return;
+        }
+
+        delete entry.client;
+        delete entry.tools;
+        entry.state = 'error';
+        entry.lastError = 'Connection closed unexpectedly; start the server again to reconnect.';
+        trace(`server '${name}' connection closed unexpectedly`);
+        notifyToolsChanged();
+      };
+
       delete entry.signInUrl;
       delete entry.lastError;
-      trace(`server '${name}' started with ${String(tools.length)} tool(s)`);
+      trace(`server '${name}' started with ${String(entry.tools.length)} tool(s)`);
       notifyToolsChanged();
       return {
         ok: true,
@@ -162,12 +328,11 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
         alreadyRunning: false,
       };
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = redactSecrets(errorMessage(error), secretValues);
       entry.state = 'error';
       entry.lastError = message;
       delete entry.client;
       delete entry.tools;
-      await client.close().catch(() => undefined);
       trace(`server '${name}' failed to start: ${message}`);
       throw new Error(`Server '${name}' failed to start: ${message}`);
     }
@@ -218,6 +383,13 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
 
   const stop = async (name: string): Promise<boolean> => {
     const entry = runtime(name);
+
+    // A start may be mid-connect (client not yet assigned): wait for it to
+    // settle so its child cannot outlive the stop.
+    if (entry.startPromise !== undefined) {
+      await entry.startPromise.catch(() => undefined);
+    }
+
     if (entry.client === undefined) {
       return false;
     }
@@ -227,7 +399,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     delete entry.tools;
     entry.state = 'stopped';
     await client.close().catch((error: unknown) => {
-      trace(`closing '${name}': ${error instanceof Error ? error.message : String(error)}`);
+      trace(`closing '${name}': ${errorMessage(error)}`);
     });
     trace(`server '${name}' stopped`);
     notifyToolsChanged();
@@ -236,6 +408,10 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
 
   const stopAll = async (): Promise<void> => {
     await Promise.all([...runtimes.keys()].map((name) => stop(name)));
+    if (insecureDispatcher !== undefined) {
+      await insecureDispatcher.close().catch(() => undefined);
+      insecureDispatcher = undefined;
+    }
   };
 
   const status = (): ChildStatus[] =>
@@ -245,6 +421,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
       const base: ChildStatus = {
         name,
         state: entry.state,
+        transport: server?.type ?? 'stdio',
         autoStart: server?.autoStart ?? false,
         missingSecrets: missing,
       };
@@ -295,8 +472,23 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
       );
     }
 
-    return entry.client.callTool({ name: toolName, arguments: args ?? {} });
+    try {
+      return await entry.client.callTool({ name: toolName, arguments: args ?? {} });
+    } catch (error: unknown) {
+      // Mid-session transport errors can echo the request URL or upstream
+      // response bodies; scrub the server's secret values before the message
+      // reaches the MCP client.
+      throw new Error(redactSecrets(errorMessage(error), secretValuesFor(serverName)));
+    }
   };
 
-  return { names: () => [...runtimes.keys()], status, ensureStarted, stop, stopAll, listTools, callTool };
+  return {
+    names: () => [...runtimes.keys()],
+    status,
+    ensureStarted,
+    stop,
+    stopAll,
+    listTools,
+    callTool,
+  };
 }

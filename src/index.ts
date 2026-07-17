@@ -210,12 +210,26 @@ async function main(): Promise<void> {
     requestShutdown('MCP transport closed');
   };
 
-  // Auto-start children once the client is connected: with URL elicitation the
-  // sign-in dialog pops right away; text-fallback clients see the URL through
-  // secure_env_status / secure_env_start instead.
+  // Auto-start children once the client is connected — but never demand auth
+  // at boot. A wrapper hosts many servers, each with its own values; prompting
+  // for all of them on startup would be a wall of dialogs (or log noise).
+  // Servers whose secrets are still missing stay stopped and elicit on first
+  // use (secure_env_start) instead.
   server.oninitialized = () => {
+    const missingByName = new Map(
+      children.status().map((child) => [child.name, child.missingSecrets]),
+    );
+
     for (const [name, child] of Object.entries(wrapperConfig.servers)) {
       if (!child.autoStart) {
+        continue;
+      }
+
+      const missing = missingByName.get(name) ?? [];
+      if (missing.length > 0) {
+        process.stderr.write(
+          `[secure-env] '${name}' waits for ${missing.join(', ')}; it will ask when first started\n`,
+        );
         continue;
       }
 

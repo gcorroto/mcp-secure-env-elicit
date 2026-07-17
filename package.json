@@ -1,6 +1,6 @@
 {
   "name": "@grec0/mcp-secure-env-elicit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP wrapper that launches other MCP servers with secret env vars collected interactively via elicitation — placeholders in config, values held AES-encrypted in memory, never on disk.",
   "type": "module",
   "license": "MIT",
@@ -57,6 +57,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "express": "5.1.0",
     "selfsigned": "^5.5.0",
+    "undici": "^8.7.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
