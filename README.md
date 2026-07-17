@@ -59,6 +59,20 @@ MCP client configs (`mcp.json`, `claude_desktop_config.json`, …) are plain-tex
 - Submitted values go straight from the browser form into the encrypted in-memory vault over loopback HTTPS. They never travel through the MCP protocol, so neither the model nor the client ever sees them.
 - Values live for the **lifetime of the process**: restart your MCP client and you will be asked again (that is the price of never persisting them).
 
+## Shared config in a git repo
+
+Instead of a local path, `--config` accepts a **git URL** — so one repo (private is fine) holds the team's wrapper config, and every dev just points at it:
+
+```json
+"args": ["-y", "@grec0/mcp-secure-env-elicit", "--config", "https://git.example.com/org/mcp-configs.git#teams/backend.json"]
+```
+
+- The `#path/inside/repo.json` fragment names the file (or use `--config-file <path>`); without it, `mcp-secure-env.config.json` at the repo root is assumed.
+- The repo is cloned shallowly on the **default branch** into `~/.mcp-secure-env-elicit/repos/` and refreshed to the remote tip on every start, so config changes reach the team on their next restart.
+- Authentication rides on the **system git**: Git Credential Manager on Windows, SSH keys, cached HTTPS credentials — whatever already lets the dev `git clone` that repo works here too. No extra tokens to mint: grant read access to the repo and that is it. (First time ever on a machine, run `git clone <url>` once in a terminal — or let the credential manager's window appear — so the credentials get cached.)
+- **Offline-friendly:** if the remote is unreachable but a cached clone exists, the cached copy is used with a warning — being off VPN never blocks startup.
+- Remember the config contains **placeholders only**, so read access to the repo reveals no secret values; each dev still provides their own through the local sign-in form.
+
 ## Remote servers (HTTP / SSE)
 
 Not every MCP server is a local process. Entries with a `type` of `http`, `https`, or `sse` connect to a **remote** MCP endpoint instead of spawning one, and their `headers` (and even the `url`) accept the same placeholders:
@@ -144,7 +158,8 @@ To verify after trusting: reopen the sign-in page — no warning, and after your
 
 | Where | What |
 |---|---|
-| `--config <path>` / `MCP_SECURE_ENV_CONFIG` | Config file location. Defaults: `./mcp-secure-env.config.json`, then `~/.mcp-secure-env-elicit/config.json`. |
+| `--config <path or git url>` / `MCP_SECURE_ENV_CONFIG` | Config file location — a local path or a `…repo.git[#file]` URL (see *Shared config in a git repo*). Defaults: `./mcp-secure-env.config.json`, then `~/.mcp-secure-env-elicit/config.json`. |
+| `--config-file <path>` | File inside the config repo when `--config` is a git URL and has no `#fragment`. |
 | `--theme <name>` / `MCP_SECURE_ENV_THEME` / `"theme"` | Sign-in page theme. |
 | `HOST` / `PORT` | Loopback server binding. Defaults `127.0.0.1:48910`. Keep the port stable for browser autofill. |
 | `"servers"` (stdio) | `command`, `args`, `env` (with placeholders), optional `cwd`, optional `autoStart`. Server names cannot contain `_`. |

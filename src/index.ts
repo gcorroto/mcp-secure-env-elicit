@@ -16,6 +16,7 @@ import { resolveTheme } from './adapters/http/themes.js';
 import { loadOrCreateTls } from './adapters/http/tls.js';
 import { createMcpServer } from './adapters/mcp/create-mcp-server.js';
 import { createChildServerManager } from './application/child-server-manager.js';
+import { fetchGitConfig } from './application/git-config.js';
 import {
   createSecretRequestService,
   type McpClientBridge,
@@ -157,7 +158,14 @@ async function main(): Promise<void> {
 
   const version = packageVersion();
   const appConfig = loadAppConfig();
-  const wrapperConfig = loadWrapperConfig(appConfig.configPath);
+  const configPath =
+    appConfig.configSource.kind === 'file'
+      ? appConfig.configSource.path
+      : fetchGitConfig(
+          appConfig.configSource.source,
+          join(homedir(), '.mcp-secure-env-elicit', 'repos'),
+        );
+  const wrapperConfig = loadWrapperConfig(configPath);
   const theme = resolveTheme(appConfig.theme ?? wrapperConfig.theme);
 
   const vault = createSecretVault();

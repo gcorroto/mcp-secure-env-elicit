@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 
 import { z } from 'zod';
 
+import { parseConfigSource, type ConfigSource } from './application/git-config.js';
 import { WrapperConfigSchema, type WrapperConfig } from './schemas/wrapper-config.js';
 
 const EnvironmentSchema = z.object({
@@ -19,7 +20,8 @@ const EnvironmentSchema = z.object({
 export type AppConfig = Readonly<{
   host: string;
   port: number;
-  configPath: string;
+  /** Local file, or a shared git repository holding the config file. */
+  configSource: ConfigSource;
   /** Theme override from CLI/env; the config file value is the fallback. */
   theme?: string;
 }>;
@@ -51,11 +53,14 @@ function defaultConfigPath(): string | undefined {
 }
 
 /**
- * Load the process configuration. The wrapper config file is located via
- * `--config <path>`, then `MCP_SECURE_ENV_CONFIG`, then
+ * Load the process configuration. The wrapper config is located via
+ * `--config <path-or-git-url>`, then `MCP_SECURE_ENV_CONFIG`, then
  * `./mcp-secure-env.config.json`, then `~/.mcp-secure-env-elicit/config.json`.
- * The sign-in page theme comes from `--theme`, then `MCP_SECURE_ENV_THEME`,
- * then the `"theme"` field of the config file.
+ * A git URL (`…repo.git`, optionally with `#path/inside/repo.json`, or
+ * `--config-file <path>`) makes the wrapper clone the shared repo with the
+ * system git credentials and read the file from it. The sign-in page theme
+ * comes from `--theme`, then `MCP_SECURE_ENV_THEME`, then the `"theme"`
+ * field of the config file.
  */
 export function loadAppConfig(
   argv: readonly string[] = process.argv.slice(2),
@@ -63,23 +68,27 @@ export function loadAppConfig(
 ): AppConfig {
   const parsed = EnvironmentSchema.parse(environment);
 
-  const configPath =
+  const rawConfig =
     readArg(argv, '--config') ?? parsed.MCP_SECURE_ENV_CONFIG ?? defaultConfigPath();
 
-  if (configPath === undefined) {
+  if (rawConfig === undefined) {
     throw new Error(
-      `No configuration found. Pass --config <path>, set MCP_SECURE_ENV_CONFIG, or create ` +
-        `'${DEFAULT_CONFIG_BASENAME}' in the working directory (or ` +
+      `No configuration found. Pass --config <path or git url>, set MCP_SECURE_ENV_CONFIG, ` +
+        `or create '${DEFAULT_CONFIG_BASENAME}' in the working directory (or ` +
         `'~/.mcp-secure-env-elicit/config.json').`,
     );
   }
 
+  const configSource = parseConfigSource(rawConfig, readArg(argv, '--config-file'));
   const theme = readArg(argv, '--theme') ?? parsed.MCP_SECURE_ENV_THEME;
 
   return {
     host: parsed.HOST,
     port: parsed.PORT,
-    configPath: resolve(configPath),
+    configSource:
+      configSource.kind === 'file'
+        ? { kind: 'file', path: resolve(configSource.path) }
+        : configSource,
     ...(theme === undefined ? {} : { theme }),
   };
 }
