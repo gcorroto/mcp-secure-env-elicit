@@ -130,8 +130,11 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
   const insecureFetch = (): FetchLike => {
     insecureDispatcher ??= new Agent({ connect: { rejectUnauthorized: false } });
     const dispatcher = insecureDispatcher;
-    return ((url: string | URL, init?: RequestInit) =>
-      undiciFetch(url, { ...init, dispatcher })) as unknown as FetchLike;
+    // npm undici's RequestInit type diverges from the global one the SDK
+    // hands us; bridge it on the way in (tsc requires it under
+    // exactOptionalPropertyTypes).
+    return (url: string | URL, init?: RequestInit) =>
+      undiciFetch(url, { ...init, dispatcher } as unknown as Parameters<typeof undiciFetch>[1]);
   };
 
   const runtime = (name: string): ChildRuntime => {
