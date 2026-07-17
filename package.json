@@ -1,0 +1,74 @@
+{
+  "name": "@grec0/mcp-secure-env-elicit",
+  "version": "0.1.0",
+  "description": "MCP wrapper that launches other MCP servers with secret env vars collected interactively via elicitation — placeholders in config, values held AES-encrypted in memory, never on disk.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Gregorio Corroto (https://github.com/gcorroto)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gcorroto/mcp-secure-env-elicit.git"
+  },
+  "homepage": "https://github.com/gcorroto/mcp-secure-env-elicit#readme",
+  "bugs": {
+    "url": "https://github.com/gcorroto/mcp-secure-env-elicit/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "secrets",
+    "elicitation",
+    "env",
+    "environment-variables",
+    "wrapper",
+    "proxy",
+    "claude"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-secure-env-elicit": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "config.example.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run lint && npm run typecheck && npm test && npm run build",
+    "dev": "tsx watch src/index.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/index.js",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "5.1.0",
+    "selfsigned": "^5.5.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.1",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.5",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.64.0",
+    "vitest": "^4.1.10"
+  }
+}

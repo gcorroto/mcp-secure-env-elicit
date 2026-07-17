@@ -1,0 +1,28 @@
+{
+  "theme": "dark",
+  "servers": {
+    "oracle": {
+      "command": "npx",
+      "args": ["-y", "@grec0/mcp-oracle-db"],
+      "env": {
+        "ORACLE_CONNECTION_STRING": "${secure:ORACLE_USER}/${secure:ORACLE_PASSWORD}@//db.example.com:1521/XEPDB1"
+      },
+      "autoStart": true
+    },
+    "planka": {
+      "command": "npx",
+      "args": ["-y", "@grec0/mcp-planka"],
+      "env": {
+        "PLANKA_BASE_URL": "https://planka.example.com",
+        "PLANKA_AGENT_EMAIL": "${secure:PLANKA_EMAIL:email}",
+        "PLANKA_AGENT_PASSWORD": "${secure:PLANKA_PASSWORD}"
+      }
+    }
+  },
+  "secrets": {
+    "ORACLE_USER": { "description": "Oracle schema user", "input": "text" },
+    "ORACLE_PASSWORD": { "description": "Oracle schema password" },
+    "PLANKA_EMAIL": { "description": "Planka agent account email" },
+    "PLANKA_PASSWORD": { "description": "Planka agent account password" }
+  }
+}
