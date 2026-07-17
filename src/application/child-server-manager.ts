@@ -131,10 +131,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     insecureDispatcher ??= new Agent({ connect: { rejectUnauthorized: false } });
     const dispatcher = insecureDispatcher;
     return ((url: string | URL, init?: RequestInit) =>
-      undiciFetch(url, {
-        ...(init as Parameters<typeof undiciFetch>[1]),
-        dispatcher,
-      })) as unknown as FetchLike;
+      undiciFetch(url, { ...init, dispatcher })) as unknown as FetchLike;
   };
 
   const runtime = (name: string): ChildRuntime => {

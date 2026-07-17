@@ -125,16 +125,11 @@ The sign-in page must be HTTPS (MCP clients only open `https:` URLs for URL elic
 
 The certificate is persisted at `~/.mcp-secure-env-elicit/tls/cert.pem` — stable across runs, 825-day validity, proper `serverAuth` usage — precisely so you can trust it **once** and be done. Pick one of these, in increasing order of effort:
 
-1. **Trust the generated certificate (2 minutes, recommended).** Import it into your OS trust store, restart the browser, and the padlock turns green:
-   - **Windows** (a confirmation dialog pops up — accept it):
-     ```
-     certutil -addstore -user Root "%USERPROFILE%\.mcp-secure-env-elicit\tls\cert.pem"
-     ```
-   - **macOS:**
-     ```
-     security add-trusted-cert -k ~/Library/Keychains/login.keychain-db ~/.mcp-secure-env-elicit/tls/cert.pem
-     ```
-   - **Linux (Debian/Ubuntu):** copy it under `/usr/local/share/ca-certificates/` (as `.crt`) and run `sudo update-ca-certificates`
+1. **One command (recommended).** No repo, no paths — the same npx package does it:
+   ```
+   npx -y @grec0/mcp-secure-env-elicit trust-cert
+   ```
+   It generates the certificate if needed and registers it in your OS trust store (on Windows, accept the confirmation dialog; on macOS it may ask for your password; on Linux it prints the two `sudo` commands to run). Then restart your browser.
 
    Why this works: "insecure" only means "signed by someone the OS does not know". Adding the certificate to your user's trusted store makes *you* the authority that vouches for it — reasonable here because the key never leaves your machine and the server only listens on `127.0.0.1`.
 2. **Use [mkcert](https://github.com/FiloSottile/mkcert).** `mkcert -install && mkcert 127.0.0.1 localhost` mints a locally-trusted pair; point the config at it:

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Server as HttpServer } from 'node:http';
@@ -99,7 +100,61 @@ function closeHttpServer(httpServer: WebServer): Promise<void> {
   });
 }
 
+/**
+ * `npx -y @grec0/mcp-secure-env-elicit trust-cert` — generate (if needed) the
+ * persisted self-signed certificate and register it in the OS trust store, so
+ * the sign-in page loses the browser warning and the browser starts offering
+ * to save the submitted values. Devs consume this package via npx only; they
+ * should never need to know where the certificate lives.
+ */
+async function trustCertCommand(): Promise<number> {
+  const host = process.env.HOST ?? '127.0.0.1';
+  const stateDir = join(homedir(), '.mcp-secure-env-elicit', 'tls');
+  const tls = await loadOrCreateTls({ host, stateDir });
+  const certPath = tls.certPath ?? join(stateDir, 'cert.pem');
+  process.stdout.write(`Sign-in certificate: ${certPath}\n`);
+
+  if (process.platform === 'win32') {
+    process.stdout.write('Adding it to your user Trusted Root store (accept the dialog)…\n');
+    const result = spawnSync('certutil', ['-addstore', '-user', 'Root', certPath], {
+      stdio: 'inherit',
+    });
+    if (result.status !== 0) {
+      process.stdout.write('certutil failed — run this command again and accept the dialog.\n');
+      return result.status ?? 1;
+    }
+  } else if (process.platform === 'darwin') {
+    process.stdout.write('Adding it to your login keychain (you may be asked for your password)…\n');
+    const keychain = join(homedir(), 'Library', 'Keychains', 'login.keychain-db');
+    const result = spawnSync('security', ['add-trusted-cert', '-k', keychain, certPath], {
+      stdio: 'inherit',
+    });
+    if (result.status !== 0) {
+      return result.status ?? 1;
+    }
+  } else {
+    process.stdout.write(
+      'On Linux, run:\n' +
+        `  sudo cp "${certPath}" /usr/local/share/ca-certificates/mcp-secure-env-elicit.crt\n` +
+        '  sudo update-ca-certificates\n',
+    );
+    return 0;
+  }
+
+  process.stdout.write(
+    'Done. Restart your browser: the sign-in page is now trusted and the browser will offer ' +
+      'to remember the values you submit.\n',
+  );
+  return 0;
+}
+
 async function main(): Promise<void> {
+  const commandArgs = process.argv.slice(2);
+  if (commandArgs[0] === 'trust-cert') {
+    process.exitCode = await trustCertCommand();
+    return;
+  }
+
   const version = packageVersion();
   const appConfig = loadAppConfig();
   const wrapperConfig = loadWrapperConfig(appConfig.configPath);
