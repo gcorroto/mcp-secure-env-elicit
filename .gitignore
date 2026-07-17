@@ -4,3 +4,9 @@ coverage/
 *.log
 .env
 mcp-secure-env.config.json
+
+# Local tooling state
+.claude/
+.vscode/
+.idea/
+*.tsbuildinfo
