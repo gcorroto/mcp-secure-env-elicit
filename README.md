@@ -68,7 +68,8 @@ Instead of a local path, `--config` accepts a **git URL** — so one repo (priva
 ```
 
 - The `#path/inside/repo.json` fragment names the file (or use `--config-file <path>`); without it, `mcp-secure-env.config.json` at the repo root is assumed.
-- The repo is cloned shallowly on the **default branch** into `~/.mcp-secure-env-elicit/repos/` and refreshed to the remote tip on every start, so config changes reach the team on their next restart.
+- The repo is cloned shallowly on the **default branch** into `~/.mcp-secure-env-elicit/repos/`. Only the first-ever start pays for the network: afterwards the cached copy is used immediately and refreshed **in the background**, so startup stays well inside MCP client connect timeouts and config changes reach each dev on their *next* restart.
+- Tip: MCP clients typically allow ~30s for a server to start, and a cold `npx` download plus the first clone can exceed it. If the very first connection times out, just reconnect — everything is cached by then. Pinning an exact version (`@grec0/mcp-secure-env-elicit@x.y.z`) also makes npx noticeably faster on slow networks.
 - Authentication rides on the **system git**: Git Credential Manager on Windows, SSH keys, cached HTTPS credentials — whatever already lets the dev `git clone` that repo works here too. No extra tokens to mint: grant read access to the repo and that is it. (First time ever on a machine, run `git clone <url>` once in a terminal — or let the credential manager's window appear — so the credentials get cached.)
 - **Offline-friendly:** if the remote is unreachable but a cached clone exists, the cached copy is used with a warning — being off VPN never blocks startup.
 - Remember the config contains **placeholders only**, so read access to the repo reveals no secret values; each dev still provides their own through the local sign-in form.

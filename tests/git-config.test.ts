@@ -95,7 +95,7 @@ describe('fetchGitConfig', () => {
     expect(readFileSync(path, 'utf8')).toBe('{"servers":{}}');
   });
 
-  it('refreshes an existing clone to the remote tip', () => {
+  it('refreshes an existing clone to the remote tip (blocking mode)', () => {
     const origin = createOriginRepo({ [DEFAULT_REPO_CONFIG_FILE]: '{"v":1}' });
     cleanups.push(origin);
     const cacheRoot = tempCacheRoot();
@@ -105,8 +105,30 @@ describe('fetchGitConfig', () => {
     writeFileSync(join(origin, DEFAULT_REPO_CONFIG_FILE), '{"v":2}');
     git(origin, 'commit', '-am', 'update');
 
-    const path = fetchGitConfig(source, cacheRoot);
+    const path = fetchGitConfig(source, cacheRoot, 'blocking');
 
+    expect(readFileSync(path, 'utf8')).toBe('{"v":2}');
+  });
+
+  it('returns the cache immediately and refreshes in the background by default', async () => {
+    const origin = createOriginRepo({ [DEFAULT_REPO_CONFIG_FILE]: '{"v":1}' });
+    cleanups.push(origin);
+    const cacheRoot = tempCacheRoot();
+    const source = { url: origin, filePath: DEFAULT_REPO_CONFIG_FILE };
+
+    fetchGitConfig(source, cacheRoot);
+    writeFileSync(join(origin, DEFAULT_REPO_CONFIG_FILE), '{"v":2}');
+    git(origin, 'commit', '-am', 'update');
+
+    // Immediate return with the cached content — the refresh has not landed.
+    const path = fetchGitConfig(source, cacheRoot);
+    expect(readFileSync(path, 'utf8')).toBe('{"v":1}');
+
+    // The background refresh converges for the next start.
+    const deadline = Date.now() + 10_000;
+    while (readFileSync(path, 'utf8') !== '{"v":2}' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
     expect(readFileSync(path, 'utf8')).toBe('{"v":2}');
   });
 
@@ -118,7 +140,7 @@ describe('fetchGitConfig', () => {
     fetchGitConfig(source, cacheRoot);
     rmSync(origin, { recursive: true, force: true, maxRetries: 3 });
 
-    const path = fetchGitConfig(source, cacheRoot);
+    const path = fetchGitConfig(source, cacheRoot, 'blocking');
 
     expect(readFileSync(path, 'utf8')).toBe('{"v":1}');
   });

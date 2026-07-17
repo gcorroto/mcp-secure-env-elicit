@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
@@ -76,18 +76,51 @@ function cacheDirFor(url: string, cacheRoot: string): string {
   return join(cacheRoot, `${slug === '' ? 'repo' : slug}-${hash}`);
 }
 
+/** Fire-and-forget refresh of a cached clone, for the NEXT start. */
+function refreshInBackground(dir: string): void {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  const fetch = spawn('git', ['fetch', '--depth', '1', 'origin', 'HEAD'], {
+    cwd: dir,
+    stdio: 'ignore',
+    env,
+  });
+  fetch.on('error', () => undefined);
+  fetch.on('exit', (code) => {
+    if (code !== 0) {
+      trace('could not refresh the config repo; the cached copy stays in use');
+      return;
+    }
+
+    const reset = spawn('git', ['reset', '--hard', 'FETCH_HEAD'], {
+      cwd: dir,
+      stdio: 'ignore',
+      env,
+    });
+    reset.on('error', () => undefined);
+    reset.unref();
+  });
+  fetch.unref();
+}
+
 /**
- * Ensure a local, up-to-date copy of the shared config repository and return
- * the absolute path of the config file inside it.
+ * Ensure a local copy of the shared config repository and return the absolute
+ * path of the config file inside it.
  *
  * The clone uses the system `git`, so authentication rides on whatever the
  * developer already has — Git Credential Manager, SSH keys, cached HTTPS
  * credentials — no extra tokens. The default branch is used (that is what a
- * fresh `git clone` checks out). When the remote is unreachable but a cached
- * clone exists, the cached copy is used with a warning, so being offline
- * never blocks startup.
+ * fresh `git clone` checks out).
+ *
+ * Only the first-ever start pays for the network: when a cached clone
+ * exists it is used immediately and refreshed in the background, so config
+ * changes land on the next start and startup stays fast enough for MCP
+ * client connect timeouts. Offline machines simply keep the cache.
  */
-export function fetchGitConfig(source: GitConfigSource, cacheRoot: string): string {
+export function fetchGitConfig(
+  source: GitConfigSource,
+  cacheRoot: string,
+  refresh: 'background' | 'blocking' = 'background',
+): string {
   const dir = cacheDirFor(source.url, cacheRoot);
 
   if (!existsSync(join(dir, '.git'))) {
@@ -100,8 +133,10 @@ export function fetchGitConfig(source: GitConfigSource, cacheRoot: string): stri
           `(try 'git clone ${source.url}' in a terminal once).`,
       );
     }
+  } else if (refresh === 'background') {
+    refreshInBackground(dir);
   } else {
-    // Refresh to the tip of the remote default branch; offline keeps the cache.
+    // Blocking refresh (tests and callers that need the tip right now).
     const fetch = runGit(['fetch', '--depth', '1', 'origin', 'HEAD'], dir);
     const reset = fetch.ok ? runGit(['reset', '--hard', 'FETCH_HEAD'], dir) : fetch;
     if (!reset.ok) {
