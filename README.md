@@ -101,6 +101,14 @@ Not every MCP server is a local process. Entries with a `type` of `http`, `https
 - `insecureTls: true` accepts a server certificate that is not publicly trusted (self-signed or internal CA), scoped to that server's requests only — the equivalent of npm's `strict-ssl=false` for your internal tooling host.
 - No `type` (or `"type": "stdio"`) keeps the spawn behaviour: `command`, `args`, `env`, `cwd`.
 
+> **TLS and stdio children:** `insecureTls` only exists on remote entries, because there the *wrapper* makes the HTTP requests. When a **stdio** child talks to an internal host itself, configure TLS in the *child's* environment instead. For Node-based children (Node ≥ 22.15), the clean option is the OS certificate store:
+>
+> ```json
+> "env": { "NODE_USE_SYSTEM_CA": "1" }
+> ```
+>
+> (or `"NODE_EXTRA_CA_CERTS": "C:/path/ca.pem"`, or as a last resort `"NODE_TLS_REJECT_UNAUTHORIZED": "0"`).
+
 ## Placeholders
 
 `${secure:NAME}` anywhere inside `env` values or `args` strings for stdio servers, and inside `headers` values or the `url` for remote ones — including embedded in larger strings (connection URLs, DSNs, `Bearer …` prefixes). The same `NAME` used across several servers is asked **once** and shared.
