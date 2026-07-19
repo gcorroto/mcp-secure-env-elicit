@@ -2,15 +2,96 @@
 
 **Stop putting secrets in your `mcp.json`.** This MCP server is a wrapper that launches other MCP servers for you: their config lives inside this package's config file with `${secure:…}` placeholders instead of real values, and when a server needs to start, the missing values are collected from you through a browser form (MCP URL elicitation) and kept **AES-256-GCM encrypted in memory** — never written to disk, never visible to the model or the MCP client.
 
-```
-Claude / MCP client ──stdio──▶ mcp-secure-env-elicit ──stdio──▶ your real MCP servers
-                                      │                          (spawned with resolved env)
-                                      └──▶ https://127.0.0.1:48910/auth   (you type values here)
+```mermaid
+flowchart LR
+    subgraph wrapper["mcp-secure-env-elicit"]
+        vault[("in-memory vault<br/>AES-256-GCM")]
+    end
+    client["Claude / MCP client"] -- "stdio" --> wrapper
+    wrapper -- "stdio · env resolved at spawn" --> servers["your real MCP servers"]
+    browser["your browser<br/>https://127.0.0.1:48910/auth"] -. "loopback HTTPS" .-> vault
 ```
 
 ## Why
 
-MCP client configs (`mcp.json`, `claude_desktop_config.json`, …) are plain-text files that end up in dotfile repos, screenshots, and backups. With this wrapper the client config contains **zero secrets**, and the wrapped servers' configs contain **placeholders only**.
+Most companies never get SSO wired into every internal tool: the database has its own credentials, SonarQube its own token, Jira yet another one. So each developer wires up their own MCP servers by hand, configs get passed around over chat with no agreed format, and the same API keys end up duplicated **in plain text** across every agent's config on every machine — files that then land in dotfile repos, screenshots, and backups:
+
+```mermaid
+flowchart TB
+    subgraph devA["Dev A"]
+        a1["Claude Code · mcp.json<br/>🔑 keys in plain text"]
+        a2["Copilot · mcp.json<br/>🔑 same keys again"]
+    end
+    subgraph devB["Dev B"]
+        b1["Codex CLI · config file<br/>🔑 same keys again"]
+        b2["Cursor · mcp.json<br/>🔑 same keys again"]
+    end
+    tools["internal tools without SSO<br/>DB · SonarQube · Jira · …"]
+    a1 --> tools
+    a2 --> tools
+    b1 --> tools
+    b2 --> tools
+    devA -. "config sharing = pasting keys over chat" .- devB
+```
+
+This wrapper flips that picture. MCP is the one interface every coding agent already speaks — Claude Code, Claude Desktop, Copilot, Codex CLI, Cursor, whatever comes next — so the wrapper becomes the **single place** where env secrets are handled. Every agent of every dev points at the **same** wrapper config (a local file or a shared git repo) that contains **placeholders only**; each dev types the real values once per session, and they live encrypted in that process's memory and nowhere else:
+
+```mermaid
+flowchart LR
+    subgraph agents["every agent, every dev"]
+        c1["Claude Code"]
+        c2["Copilot"]
+        c3["Codex CLI"]
+        c4["any MCP client"]
+    end
+    cfg["one shared config<br/>local file or git repo<br/>placeholders only — zero secrets"] --> w["mcp-secure-env-elicit"]
+    c1 & c2 & c3 & c4 -- "stdio" --> w
+    w --> tools["wrapped MCP servers<br/>→ internal tools"]
+    w -.-> vault[("real values: typed once per dev,<br/>AES-256-GCM in memory only")]
+```
+
+The result: the MCP client config contains **zero secrets**, the wrapped servers' shared config contains **placeholders only**, and onboarding a new dev (or a new agent) is "point it at the config" — no key handover involved.
+
+## How it works
+
+The wrapper sits between your MCP client and the real servers. It speaks stdio to the client, proxies every tool of every child it spawns, and owns the only copy of your secret values — sealed in an in-memory vault.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Claude / MCP client
+    participant Wrapper as mcp-secure-env-elicit
+    participant Browser as Browser form (loopback HTTPS)
+    participant Child as Wrapped server
+
+    Client->>Wrapper: secure_env_start "oracle"
+    Wrapper->>Wrapper: resolve placeholders against the vault
+    alt values missing
+        Wrapper-->>Client: elicitation with a single-use sign-in URL
+        Note over Client,Browser: the URL carries a token, never a secret
+        Browser->>Wrapper: you fill and submit the form
+        Wrapper->>Wrapper: values sealed AES-256-GCM into RAM
+        Client->>Wrapper: secure_env_start again
+    end
+    Wrapper->>Child: spawn with decrypted env
+    Child-->>Client: tools proxied as oracle__*
+```
+
+The life of a secret, start to finish:
+
+1. **Declared.** The wrapper config references it as `${secure:ORACLE_PASSWORD}` — inside `env` values or `args` for stdio servers, inside `headers` or the `url` for remote ones. No real value exists anywhere in any file.
+2. **Requested.** When a server starts and some of its placeholders have no value in the vault yet, the wrapper raises a **URL-mode elicitation**. Clients that support it pop a dialog that opens the sign-in page; clients that don't receive the URL in the tool result — open it manually and re-run the command after submitting. Links are **single-use** and stay valid for the **whole 10-minute window**, even if the tool call already returned.
+3. **Collected.** You type the values into the form and submit. They travel **only over loopback HTTPS**, straight from your browser into the wrapper process — never through the MCP protocol, so neither the model nor the client ever sees them. There is deliberately no "set secret" tool.
+4. **Sealed.** Each value is immediately encrypted with **AES-256-GCM** under a key minted at process start and held only in the wrapper's memory. Nothing is ever written to disk.
+5. **Used.** Values are decrypted only at spawn time, directly into the child's environment (or into the request headers of a remote server). The same `NAME` shared by several servers is asked once and reused.
+6. **Gone.** The key and every value die with the process. Restart your MCP client and you'll be asked again — that's the price of never persisting anything, softened by browser autofill (see [Trusted TLS](#trusted-tls--browser-autofill)).
+
+This is what the operator actually sees — the sign-in form for the `oracle` example below, and the confirmation after submitting (`dark` theme):
+
+<p align="center">
+  <img src="docs/elicitation-form.png" alt="Sign-in form asking for ORACLE_USER and ORACLE_PASSWORD" width="49%">
+  <img src="docs/elicitation-saved.png" alt="Values saved confirmation page" width="49%">
+</p>
 
 ## Quick start
 
@@ -52,12 +133,11 @@ MCP client configs (`mcp.json`, `claude_desktop_config.json`, …) are plain-tex
 
 **3.** Use it. Ask your client to call `secure_env_start` with `{"server": "oracle"}` (or let `autoStart` do it). If values are missing you get a link like `https://127.0.0.1:48910/auth?token=…` — open it, fill the form, submit, run the command again. Done: the oracle tools now appear as `oracle__<tool>`.
 
-## How the elicitation works
+## Placeholders
 
-- When a server needs secrets that are not in memory, the wrapper raises a **URL-mode elicitation**. Clients that support it pop a dialog that opens the form; clients that do not (text fallback) receive the URL in the tool result — open it manually and re-run the command after submitting.
-- Links are **single-use** and stay valid for the **whole 10-minute window**, even if the tool call already returned.
-- Submitted values go straight from the browser form into the encrypted in-memory vault over loopback HTTPS. They never travel through the MCP protocol, so neither the model nor the client ever sees them.
-- Values live for the **lifetime of the process**: restart your MCP client and you will be asked again (that is the price of never persisting them).
+`${secure:NAME}` works anywhere inside `env` values or `args` strings for stdio servers, and inside `headers` values or the `url` for remote ones — including embedded in larger strings (connection URLs, DSNs, `Bearer …` prefixes).
+
+Optionally pick the form widget: `${secure:NAME:type}` with `text`, `password`, `email`, `number`, `url` or `tel`. Types can also be set in the `secrets` metadata (`"input": "email"`). When nothing is explicit, the widget is inferred from the name: variables matching `PASSWORD`, `PASS`, `PWD`, `SECRET`, `TOKEN`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `CREDENTIAL`, `AUTH` render as password inputs; names containing `MAIL` render as email inputs.
 
 ## Shared config in a git repo
 
@@ -98,32 +178,8 @@ Not every MCP server is a local process. Entries with a `type` of `http`, `https
 
 - `http` / `https` use the modern **Streamable HTTP** transport and automatically fall back to SSE if the endpoint turns out to be a legacy one — so `"type": "https"` works for both kinds without you having to know.
 - `sse` forces the legacy SSE transport (headers are sent on the stream request too).
-- `insecureTls: true` accepts a server certificate that is not publicly trusted (self-signed or internal CA), scoped to that server's requests only — the equivalent of npm's `strict-ssl=false` for your internal tooling host.
+- `insecureTls: true` accepts a server certificate that is not publicly trusted (self-signed or internal CA), scoped to that server's requests only. It covers requests made by the *wrapper*; a **stdio** child that talks to an internal host itself needs TLS configured in its own `env` instead (for Node ≥ 22.15 children: `"NODE_USE_SYSTEM_CA": "1"`, or `NODE_EXTRA_CA_CERTS`).
 - No `type` (or `"type": "stdio"`) keeps the spawn behaviour: `command`, `args`, `env`, `cwd`.
-
-> **TLS and stdio children:** `insecureTls` only exists on remote entries, because there the *wrapper* makes the HTTP requests. When a **stdio** child talks to an internal host itself, configure TLS in the *child's* environment instead. For Node-based children (Node ≥ 22.15), the clean option is the OS certificate store:
->
-> ```json
-> "env": { "NODE_USE_SYSTEM_CA": "1" }
-> ```
->
-> (or `"NODE_EXTRA_CA_CERTS": "C:/path/ca.pem"`, or as a last resort `"NODE_TLS_REJECT_UNAUTHORIZED": "0"`).
-
-## Placeholders
-
-`${secure:NAME}` anywhere inside `env` values or `args` strings for stdio servers, and inside `headers` values or the `url` for remote ones — including embedded in larger strings (connection URLs, DSNs, `Bearer …` prefixes). The same `NAME` used across several servers is asked **once** and shared.
-
-Optionally pick the form widget: `${secure:NAME:type}` with `text`, `password`, `email`, `number`, `url` or `tel`. Types can also be set in the `secrets` metadata (`"input": "email"`). When nothing is explicit, the widget is inferred from the name: variables matching `PASSWORD`, `PASS`, `PWD`, `SECRET`, `TOKEN`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `CREDENTIAL`, `AUTH` render as password inputs; names containing `MAIL` render as email inputs.
-
-## Let the browser remember the values
-
-The form is deliberately **autofill-friendly**: every input has a stable `name`/`id` (the variable name itself) and a real `autocomplete` token — no `autocomplete="off"` anywhere. That means your browser (or password manager) offers to save what you submit and proposes it again the next time the same server asks, so re-entering values after a restart is usually two clicks.
-
-Three things keep autofill working:
-
-- **A trusted certificate.** Browsers refuse to *save* passwords on pages with certificate errors — if the padlock is broken, Chrome silently skips the "save password?" prompt. Follow the [Trusted TLS](#trusted-tls-no-browser-warning) section once and saving starts working.
-- **A stable port.** The browser keys saved values on the page origin (scheme + host + port). The default port is `48910`; if it is busy the wrapper falls back to an ephemeral port for that run (and saved values will not be offered). Override with the `PORT` env var.
-- **A stable URL path.** The form always lives at `/auth`; the token travels in the query string, which does not affect autofill.
 
 ## Tools
 
@@ -134,6 +190,10 @@ Three things keep autofill working:
 | `secure_env_stop` | Stop a running server and remove its tools. |
 | `<server>__<tool>` | Every tool of every running child, forwarded verbatim (schema included). The tool list refreshes via `notifications/tools/list_changed`. |
 
+## Trusted TLS & browser autofill
+
+The sign-in page must be HTTPS (MCP clients only open `https:` URLs for elicitation), so the wrapper auto-generates a self-signed certificate under `~/.mcp-secure-env-elicit/tls/`. It works as-is, but browsers refuse to *save* passwords on untrusted pages — trust the certificate once with `npx -y @grec0/mcp-secure-env-elicit trust-cert` (restart the browser afterwards) and your password manager will offer to remember the values and refill them in two clicks after every restart. Prefer your own certificate ([mkcert](https://github.com/FiloSottile/mkcert), an internal CA, or a real domain pointed at `127.0.0.1`)? Set `"tls": { "certPath": "…", "keyPath": "…" }` in the config. Keep `PORT` stable (default `48910`): autofill is keyed to the page origin.
+
 ## Themes
 
 The sign-in page ships with several looks: `light` (default), `dark`, `ocean`, `forest`, `terminal`, `sunset`. Pick one with:
@@ -141,27 +201,6 @@ The sign-in page ships with several looks: `light` (default), `dark`, `ocean`, `
 - `--theme dark` on the command line, or
 - `MCP_SECURE_ENV_THEME=dark`, or
 - `"theme": "dark"` in the config file.
-
-## Trusted TLS (no browser warning)
-
-The sign-in page must be HTTPS (MCP clients only open `https:` URLs for URL elicitation). Out of the box the wrapper generates a **self-signed** certificate — the browser cannot verify who signed it, so it shows "your connection is not private" and, more annoyingly, **refuses to save your passwords** while the certificate is untrusted.
-
-The certificate is persisted at `~/.mcp-secure-env-elicit/tls/cert.pem` — stable across runs, 825-day validity, proper `serverAuth` usage — precisely so you can trust it **once** and be done. Pick one of these, in increasing order of effort:
-
-1. **One command (recommended).** No repo, no paths — the same npx package does it:
-   ```
-   npx -y @grec0/mcp-secure-env-elicit trust-cert
-   ```
-   It generates the certificate if needed and registers it in your OS trust store (on Windows, accept the confirmation dialog; on macOS it may ask for your password; on Linux it prints the two `sudo` commands to run). Then restart your browser.
-
-   Why this works: "insecure" only means "signed by someone the OS does not know". Adding the certificate to your user's trusted store makes *you* the authority that vouches for it — reasonable here because the key never leaves your machine and the server only listens on `127.0.0.1`.
-2. **Use [mkcert](https://github.com/FiloSottile/mkcert).** `mkcert -install && mkcert 127.0.0.1 localhost` mints a locally-trusted pair; point the config at it:
-   ```json
-   { "tls": { "certPath": "C:/certs/127.0.0.1+1.pem", "keyPath": "C:/certs/127.0.0.1+1-key.pem" } }
-   ```
-3. **Use your own domain.** Point a real DNS name (e.g. `secure-env.yourdomain.com`) at `127.0.0.1`, get a real certificate for it (Let's Encrypt DNS-01 works fine for loopback names), set `HOST=secure-env.yourdomain.com` and the `tls` paths. Fully green padlock with zero trust-store changes on any machine.
-
-To verify after trusting: reopen the sign-in page — no warning, and after your first submit the browser offers to save the values.
 
 ## Configuration reference
 
