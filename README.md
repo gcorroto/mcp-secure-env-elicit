@@ -44,26 +44,31 @@ flowchart TB
 This wrapper flips that picture. MCP is the one interface every coding agent already speaks — Claude Code, Claude Desktop, Copilot, Codex CLI, Cursor, whatever comes next — so the wrapper becomes the **single place** where env secrets are handled. Every agent of every dev points at the **same** wrapper config (a local file or a shared git repo) that contains **placeholders only**; each dev types the real values once per session, and they live encrypted in that process's memory and nowhere else:
 
 ```mermaid
-flowchart LR
-    subgraph agents["every agent, every dev"]
-        c1["Claude Code"]
-        c2["Copilot"]
-        c3["Codex CLI"]
-        c4["any MCP client"]
+flowchart TB
+    repo[("one config file for the whole team<br/>git repo · mcp-secure-env.config.json<br/>servers + secrets metadata — placeholders only")]
+    subgraph devA["Dev A's machine"]
+        a1["Claude Code"]
+        a2["Copilot"]
+        wA["mcp-secure-env-elicit"]
+        vA[("Dev A's values<br/>in memory only")]
+        a1 & a2 -- "stdio" --> wA
+        wA -.- vA
     end
-    subgraph wrapped["wrapped MCP servers → internal tools"]
-        t1["oracle · stdio"]
-        t2["jira · stdio"]
-        t3["sonarqube · Streamable HTTP"]
-        t4["db · SSE"]
+    subgraph devB["Dev B's machine"]
+        b1["Codex CLI"]
+        b2["Cursor · any MCP client"]
+        wB["mcp-secure-env-elicit"]
+        vB[("Dev B's values<br/>in memory only")]
+        b1 & b2 -- "stdio" --> wB
+        wB -.- vB
     end
-    cfg["one shared config<br/>local file or git repo<br/>placeholders only — zero secrets"] --> w["mcp-secure-env-elicit"]
-    c1 & c2 & c3 & c4 -- "stdio" --> w
-    w --> t1 & t2 & t3 & t4
-    w -.-> vault[("real values: typed once per dev,<br/>AES-256-GCM in memory only")]
+    repo -- "same git url in --config" --> wA
+    repo -- "same git url in --config" --> wB
+    wA --> tools["internal tools via wrapped MCP servers<br/>stdio · Streamable HTTP · SSE"]
+    wB --> tools
 ```
 
-The result: the MCP client config contains **zero secrets**, the wrapped servers' shared config contains **placeholders only**, and onboarding a new dev (or a new agent) is "point it at the config" — no key handover involved.
+The result: **one file in one repo** describes every server and every secret's *metadata* for the whole team — every agent of every dev reads the same config, the MCP client config contains **zero secrets**, and onboarding a new dev (or a new agent) is "point it at the repo". The only thing that stays per-person is the secret *values*, typed by each dev into their own local form and held only in their own wrapper's memory — no key handover, ever.
 
 ## How it works
 
