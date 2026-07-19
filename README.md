@@ -7,8 +7,15 @@ flowchart LR
     subgraph wrapper["mcp-secure-env-elicit"]
         vault[("in-memory vault<br/>AES-256-GCM")]
     end
+    subgraph servers["your real MCP servers"]
+        s1["oracle · stdio"]
+        s2["jira · stdio"]
+        s3["sonarqube · Streamable HTTP"]
+        s4["metrics · SSE"]
+    end
     client["Claude / MCP client"] -- "stdio" --> wrapper
-    wrapper -- "stdio · env resolved at spawn" --> servers["your real MCP servers"]
+    wrapper -- "spawned · env resolved" --> s1 & s2
+    wrapper -- "connected · auth headers injected" --> s3 & s4
     browser["your browser<br/>https://127.0.0.1:48910/auth"] -. "loopback HTTPS" .-> vault
 ```
 
@@ -44,9 +51,15 @@ flowchart LR
         c3["Codex CLI"]
         c4["any MCP client"]
     end
+    subgraph wrapped["wrapped MCP servers → internal tools"]
+        t1["oracle · stdio"]
+        t2["jira · stdio"]
+        t3["sonarqube · Streamable HTTP"]
+        t4["db · SSE"]
+    end
     cfg["one shared config<br/>local file or git repo<br/>placeholders only — zero secrets"] --> w["mcp-secure-env-elicit"]
     c1 & c2 & c3 & c4 -- "stdio" --> w
-    w --> tools["wrapped MCP servers<br/>→ internal tools"]
+    w --> t1 & t2 & t3 & t4
     w -.-> vault[("real values: typed once per dev,<br/>AES-256-GCM in memory only")]
 ```
 
@@ -62,7 +75,7 @@ sequenceDiagram
     participant Client as Claude / MCP client
     participant Wrapper as mcp-secure-env-elicit
     participant Browser as Browser form (loopback HTTPS)
-    participant Child as Wrapped server
+    participant Child as Wrapped server (stdio or remote)
 
     Client->>Wrapper: secure_env_start "oracle"
     Wrapper->>Wrapper: resolve placeholders against the vault
@@ -73,7 +86,11 @@ sequenceDiagram
         Wrapper->>Wrapper: values sealed AES-256-GCM into RAM
         Client->>Wrapper: secure_env_start again
     end
-    Wrapper->>Child: spawn with decrypted env
+    alt stdio server
+        Wrapper->>Child: spawn with decrypted env vars
+    else remote server (HTTP / SSE)
+        Wrapper->>Child: connect with resolved url + headers
+    end
     Child-->>Client: tools proxied as oracle__*
 ```
 
