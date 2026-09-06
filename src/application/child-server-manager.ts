@@ -22,6 +22,7 @@ import {
   resolveRemoteTemplates,
   resolveStdioTemplates,
 } from './placeholders.js';
+import { killProcessTree } from './process-tree.js';
 import {
   type SecretField,
   type SecretRequestService,
@@ -69,6 +70,11 @@ export interface ChildServerManager {
   ensureStarted: (name: string) => Promise<StartResult>;
   stop: (name: string) => Promise<boolean>;
   stopAll: () => Promise<void>;
+  /**
+   * Last-resort, synchronous cleanup for an `exit` handler: kill the process
+   * tree of every stdio child still on record. Safe to call after stopAll().
+   */
+  killRemainingChildren: () => void;
   /** Namespaced tools of every running child. */
   listTools: () => ChildToolInfo[];
   /** Forward a namespaced tool call to the owning child. */
@@ -84,9 +90,17 @@ export type ChildServerManagerDeps = Readonly<{
   clientVersion?: string;
 }>;
 
+/** A connected child plus, for stdio children, the pid of its process tree. */
+interface Connection {
+  client: Client;
+  pid?: number;
+}
+
 interface ChildRuntime {
   state: ChildState;
   client?: Client;
+  /** Pid of the spawned stdio child, kept to kill its whole tree on stop. */
+  childPid?: number;
   tools?: { name: string; description?: string | undefined; inputSchema: unknown }[];
   startPromise?: Promise<StartResult>;
   signInUrl?: string;
@@ -204,21 +218,25 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     }
   };
 
-  const connectStdio = (
+  const connectStdio = async (
     server: StdioServerConfig,
     revealed: Record<string, string>,
-  ): Promise<Client> => {
+  ): Promise<Connection> => {
     // Decrypted values go straight into the spawn call.
     const resolved = resolveStdioTemplates(server, revealed);
 
-    return connectWith(
-      new StdioClientTransport({
-        command: server.command,
-        args: resolved.args,
-        env: { ...getDefaultEnvironment(), ...resolved.env },
-        ...(server.cwd === undefined ? {} : { cwd: server.cwd }),
-      }),
-    );
+    const transport = new StdioClientTransport({
+      command: server.command,
+      args: resolved.args,
+      env: { ...getDefaultEnvironment(), ...resolved.env },
+      ...(server.cwd === undefined ? {} : { cwd: server.cwd }),
+    });
+
+    const client = await connectWith(transport);
+    // Read the pid now: the transport drops its process reference on close,
+    // and by then we still need the tree root to kill.
+    const pid = transport.pid;
+    return pid === null ? { client } : { client, pid };
   };
 
   const connectRemote = async (
@@ -226,7 +244,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     server: RemoteServerConfig,
     revealed: Record<string, string>,
     secretValues: readonly string[],
-  ): Promise<Client> => {
+  ): Promise<Connection> => {
     const resolved = resolveRemoteTemplates(server, revealed);
     const url = new URL(resolved.url);
     const options = {
@@ -244,21 +262,21 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
       new StreamableHTTPClientTransport(url, options) as unknown as Transport;
 
     if (server.type === 'sse') {
-      return connectWith(sse());
+      return { client: await connectWith(sse()) };
     }
 
     // `http`/`https`: modern transport first, SSE as a compatibility fallback
     // (the MCP-recommended client behaviour during the migration period).
     let primaryFailure: string;
     try {
-      return await connectWith(streamable());
+      return { client: await connectWith(streamable()) };
     } catch (error: unknown) {
       primaryFailure = redactSecrets(errorMessage(error), secretValues);
       trace(`streamable http failed for '${name}' (${primaryFailure}); falling back to SSE`);
     }
 
     try {
-      return await connectWith(sse());
+      return { client: await connectWith(sse()) };
     } catch (error: unknown) {
       // Surface both attempts: the streamable error usually carries the real
       // root cause (bad token, TLS, DNS), the SSE one just echoes it worse.
@@ -281,7 +299,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     const secretValues = Object.values(revealed);
 
     try {
-      const client =
+      const { client, pid } =
         server.type === 'stdio'
           ? await connectStdio(server, revealed)
           : await connectRemote(name, server, revealed, secretValues);
@@ -290,6 +308,11 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
         const { tools } = await client.listTools();
         entry.state = 'running';
         entry.client = client;
+        if (pid === undefined) {
+          delete entry.childPid;
+        } else {
+          entry.childPid = pid;
+        }
         entry.tools = tools.map((tool) => ({
           name: tool.name,
           description: tool.description,
@@ -297,6 +320,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
         }));
       } catch (error: unknown) {
         await client.close().catch(() => undefined);
+        killProcessTree(pid);
         throw error;
       }
 
@@ -311,6 +335,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
 
         delete entry.client;
         delete entry.tools;
+        delete entry.childPid;
         entry.state = 'error';
         entry.lastError = 'Connection closed unexpectedly; start the server again to reconnect.';
         trace(`server '${name}' connection closed unexpectedly`);
@@ -333,6 +358,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
       entry.lastError = message;
       delete entry.client;
       delete entry.tools;
+      delete entry.childPid;
       trace(`server '${name}' failed to start: ${message}`);
       throw new Error(`Server '${name}' failed to start: ${message}`);
     }
@@ -395,15 +421,28 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     }
 
     const client = entry.client;
+    const pid = entry.childPid;
     delete entry.client;
     delete entry.tools;
+    delete entry.childPid;
     entry.state = 'stopped';
     await client.close().catch((error: unknown) => {
       trace(`closing '${name}': ${errorMessage(error)}`);
     });
+    // The SDK kills the direct child only. On Windows a child launched via
+    // npx/cmd.exe would otherwise leave its own grandchildren behind.
+    killProcessTree(pid);
     trace(`server '${name}' stopped`);
     notifyToolsChanged();
     return true;
+  };
+
+  const killRemainingChildren = (): void => {
+    for (const entry of runtimes.values()) {
+      const pid = entry.childPid;
+      delete entry.childPid;
+      killProcessTree(pid);
+    }
   };
 
   const stopAll = async (): Promise<void> => {
@@ -488,6 +527,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     ensureStarted,
     stop,
     stopAll,
+    killRemainingChildren,
     listTools,
     callTool,
   };

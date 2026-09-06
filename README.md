@@ -212,6 +212,12 @@ Not every MCP server is a local process. Entries with a `type` of `http`, `https
 | `secure_env_stop` | Stop a running server and remove its tools. |
 | `<server>__<tool>` | Every tool of every running child, forwarded verbatim (schema included). The tool list refreshes via `notifications/tools/list_changed`. |
 
+## Process lifetime
+
+The wrapper lives and dies with its client. A stdio MCP server gets no protocol-level goodbye, so the wrapper treats **stdin EOF** as the disconnect, and additionally **polls its parent process**: on Windows no client sends `SIGINT`/`SIGTERM`, and a server launched through `npx` (which goes through `cmd.exe`) is never killed along with the client. Shutting down stops every child server — killing its whole process tree on Windows, where `kill()` would leave grandchildren behind — closes the sign-in listener and exits, with a 5s hard deadline so that a wedged child or a pending sign-in cannot keep the process alive.
+
+Without this, clients invoked in one-shot or polling mode leak one wrapper process per invocation ([#1](https://github.com/gcorroto/mcp-secure-env-elicit/issues/1)).
+
 ## Trusted TLS & browser autofill
 
 The sign-in page must be HTTPS (MCP clients only open `https:` URLs for elicitation), so the wrapper auto-generates a self-signed certificate under `~/.mcp-secure-env-elicit/tls/`. It works as-is, but browsers refuse to *save* passwords on untrusted pages — trust the certificate once with `npx -y @grec0/mcp-secure-env-elicit trust-cert` (restart the browser afterwards) and your password manager will offer to remember the values and refill them in two clicks after every restart. Prefer your own certificate ([mkcert](https://github.com/FiloSottile/mkcert), an internal CA, or a real domain pointed at `127.0.0.1`)? Set `"tls": { "certPath": "…", "keyPath": "…" }` in the config. Keep `PORT` stable (default `48910`): autofill is keyed to the page origin.
