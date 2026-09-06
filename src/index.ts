@@ -17,6 +17,7 @@ import { loadOrCreateTls } from './adapters/http/tls.js';
 import { createMcpServer } from './adapters/mcp/create-mcp-server.js';
 import { createChildServerManager } from './application/child-server-manager.js';
 import { fetchGitConfig } from './application/git-config.js';
+import { watchParentProcess, watchStdinEof, type Watcher } from './application/lifecycle.js';
 import {
   createSecretRequestService,
   type McpClientBridge,
@@ -31,6 +32,13 @@ import { loadAppConfig, loadWrapperConfig } from './config.js';
  * lifetime use this window.
  */
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Hard deadline for a graceful shutdown. A wedged child, a pending
+ * elicitation or a keep-alive socket must never be able to keep the wrapper
+ * (and its HTTPS listener) alive after the client is gone.
+ */
+const SHUTDOWN_TIMEOUT_MS = 5_000;
 
 type WebServer = HttpServer | HttpsServer;
 
@@ -78,8 +86,9 @@ function listen(server: WebServer, host: string, preferredPort: number): Promise
   return bind(preferredPort).catch((error: unknown) => {
     if (isAddrInUse(error) && preferredPort !== 0) {
       process.stderr.write(
-        `Port ${String(preferredPort)} is in use; binding the sign-in server to an ephemeral ` +
-          `port (saved browser values will not autofill this run)\n`,
+        `Port ${String(preferredPort)} is in use — another mcp-secure-env-elicit instance is ` +
+          `probably still running. Binding the sign-in server to an ephemeral port instead ` +
+          `(saved browser values will not autofill this run).\n`,
       );
       return bind(0);
     }
@@ -90,6 +99,9 @@ function listen(server: WebServer, host: string, preferredPort: number): Promise
 
 function closeHttpServer(httpServer: WebServer): Promise<void> {
   return new Promise((resolvePromise, reject) => {
+    // `close()` alone waits for in-flight keep-alive sockets, which a browser
+    // left open on the sign-in page happily holds for minutes.
+    httpServer.closeAllConnections();
     httpServer.close((error) => {
       if (error !== undefined) {
         reject(error);
@@ -125,7 +137,9 @@ async function trustCertCommand(): Promise<number> {
       return result.status ?? 1;
     }
   } else if (process.platform === 'darwin') {
-    process.stdout.write('Adding it to your login keychain (you may be asked for your password)…\n');
+    process.stdout.write(
+      'Adding it to your login keychain (you may be asked for your password)…\n',
+    );
     const keychain = join(homedir(), 'Library', 'Keychains', 'login.keychain-db');
     const result = spawnSync('security', ['add-trusted-cert', '-k', keychain, certPath], {
       stdio: 'inherit',
@@ -241,26 +255,57 @@ async function main(): Promise<void> {
   const boundPort = await listen(httpServer, appConfig.host, appConfig.port);
   signInBaseUrl = `https://${appConfig.host}:${String(boundPort)}`;
 
+  // Disposed on shutdown so a watcher can never fire mid-teardown.
+  const watchers: Watcher[] = [];
+
   let shuttingDown = false;
-  const shutdown = async (signal: string): Promise<void> => {
+  const shutdown = async (reason: string): Promise<void> => {
     if (shuttingDown) {
       return;
     }
 
     shuttingDown = true;
-    process.stderr.write(`Shutting down after ${signal}\n`);
+    process.stderr.write(`Shutting down after ${reason}\n`);
+    for (const watcher of watchers) {
+      watcher.dispose();
+    }
+
     secretRequests.dispose();
     await children.stopAll().catch(() => undefined);
     vault.dispose();
-    await Promise.all([server.close(), closeHttpServer(httpServer)]);
+    await Promise.all([
+      server.close().catch(() => undefined),
+      closeHttpServer(httpServer).catch(() => undefined),
+    ]);
   };
 
-  const requestShutdown = (signal: string): void => {
-    void shutdown(signal).catch((error: unknown) => {
-      const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-      process.stderr.write(`Shutdown failed: ${message}\n`);
-      process.exitCode = 1;
-    });
+  const requestShutdown = (reason: string): void => {
+    if (shuttingDown) {
+      return;
+    }
+
+    // Exiting explicitly is the whole point: the sign-in server (and a child's
+    // pipes) hold the event loop open, so returning from shutdown() would not
+    // end the process — the wrapper would linger for ever once its client is
+    // gone. The unref'd timer is the escape hatch for a teardown that hangs.
+    const hardExit = setTimeout(() => {
+      process.stderr.write(
+        `Shutdown did not finish in ${String(SHUTDOWN_TIMEOUT_MS)}ms; exiting\n`,
+      );
+      process.exit(process.exitCode ?? 0);
+    }, SHUTDOWN_TIMEOUT_MS);
+    hardExit.unref();
+
+    void shutdown(reason)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+        process.stderr.write(`Shutdown failed: ${message}\n`);
+        process.exitCode = 1;
+      })
+      .finally(() => {
+        clearTimeout(hardExit);
+        process.exit(process.exitCode ?? 0);
+      });
   };
 
   process.once('SIGINT', () => {
@@ -272,6 +317,23 @@ async function main(): Promise<void> {
   server.onclose = () => {
     requestShutdown('MCP transport closed');
   };
+
+  // Last resort, on every exit path (including the hard one above): no stdio
+  // child may outlive the wrapper, or the leak just moves one level down.
+  process.on('exit', () => {
+    children.killRemainingChildren();
+  });
+
+  // No MCP client sends SIGINT/SIGTERM on Windows — and with `npx` there is a
+  // `cmd.exe` in between anyway — so the parent going away has to be noticed
+  // by polling it. See issue #1.
+  watchers.push(
+    watchParentProcess({
+      onParentGone: () => {
+        requestShutdown('parent process exited');
+      },
+    }),
+  );
 
   // Auto-start children once the client is connected — but never demand auth
   // at boot. A wrapper hosts many servers, each with its own values; prompting
@@ -318,6 +380,23 @@ async function main(): Promise<void> {
     throw error;
   }
 
+  // `Protocol.connect` owns `transport.onclose`; chain rather than replace it.
+  const transportClosed = transport.onclose?.bind(transport);
+  transport.onclose = () => {
+    transportClosed?.();
+    requestShutdown('stdio transport closed');
+  };
+
+  // The client hanging up is an EOF on stdin, and nothing in the SDK watches
+  // for it: `StdioServerTransport.start()` only subscribes to 'data' and
+  // 'error', so `server.onclose` never fires on disconnect. Installed after
+  // connect(), whose 'data' listener is what makes 'end' fire at all.
+  watchers.push(
+    watchStdinEof(process.stdin, () => {
+      requestShutdown('stdin closed (client disconnected)');
+    }),
+  );
+
   // stdout is reserved for MCP JSON-RPC messages when using stdio.
   process.stderr.write(
     `mcp-secure-env-elicit v${version} — sign-in page (self-signed) on ` +
@@ -329,4 +408,10 @@ main().catch((error: unknown) => {
   const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
   process.stderr.write(`Failed to start server: ${message}\n`);
   process.exitCode = 1;
+  // A half-started wrapper may already hold the sign-in listener open, which
+  // would keep the event loop (and the process) alive for ever. The unref'd
+  // delay only gives stderr a chance to flush first.
+  setTimeout(() => {
+    process.exit(1);
+  }, 100).unref();
 });
