@@ -16,6 +16,7 @@ import {
   type StdioServerConfig,
   type WrapperConfig,
 } from '../schemas/wrapper-config.js';
+import { type PathSettings } from './path-settings.js';
 import { resolveInputType } from './input-type.js';
 import {
   collectSecretReferences,
@@ -83,6 +84,7 @@ export interface ChildServerManager {
 
 export type ChildServerManagerDeps = Readonly<{
   config: WrapperConfig;
+  pathSettings?: PathSettings;
   vault: SecretVault;
   secretRequests: SecretRequestService;
   /** Invoked whenever the set of proxied tools changes (start/stop). */
@@ -223,13 +225,19 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     revealed: Record<string, string>,
   ): Promise<Connection> => {
     // Decrypted values go straight into the spawn call.
-    const resolved = resolveStdioTemplates(server, revealed);
+    const paths =
+      deps.pathSettings?.prepare([
+        ...server.args,
+        ...Object.values(server.env),
+        ...(server.cwd === undefined ? [] : [server.cwd]),
+      ]) ?? {};
+    const resolved = resolveStdioTemplates(server, revealed, paths);
 
     const transport = new StdioClientTransport({
       command: server.command,
       args: resolved.args,
       env: { ...getDefaultEnvironment(), ...resolved.env },
-      ...(server.cwd === undefined ? {} : { cwd: server.cwd }),
+      ...(resolved.cwd === undefined ? {} : { cwd: resolved.cwd }),
     });
 
     const client = await connectWith(transport);

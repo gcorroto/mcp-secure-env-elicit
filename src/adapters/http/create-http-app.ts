@@ -1,5 +1,6 @@
 import express, { type Express, type Request, type Response } from 'express';
 
+import { type PathSettings } from '../../application/path-settings.js';
 import { autocompleteFor } from '../../application/input-type.js';
 import {
   type AuthPagePort,
@@ -11,6 +12,8 @@ export type HttpDependencies = Readonly<{
   auth: AuthPagePort;
   theme: ThemeTokens;
   serviceVersion: string;
+  pathSettings?: PathSettings;
+  pathToken?: string;
 }>;
 
 function escapeHtml(value: string): string {
@@ -37,7 +40,13 @@ function readField(body: unknown, field: string): string {
   return '';
 }
 
-export function createHttpApp({ auth, theme, serviceVersion }: HttpDependencies): Express {
+export function createHttpApp({
+  auth,
+  theme,
+  serviceVersion,
+  pathSettings,
+  pathToken,
+}: HttpDependencies): Express {
   const style = renderStyle(theme);
 
   /** Wrap inner card markup in the full HTML document with the theme CSS. */
@@ -162,5 +171,66 @@ export function createHttpApp({ auth, theme, serviceVersion }: HttpDependencies)
       );
   });
 
+  const renderPaths = (values: Record<string, string>, error?: string): string =>
+    page(
+      'Local paths',
+      `<div class="card-body"><h1>Local paths</h1><p>These settings are stored locally.</p>` +
+        (error === undefined ? '' : `<p class="error">${escapeHtml(error)}</p>`) +
+        `<form method="post" action="/paths"><input type="hidden" name="token" value="${escapeHtml(pathToken ?? '')}">` +
+        Object.entries(values)
+          .map(
+            ([name, value]) =>
+              `<label for="${escapeHtml(name)}">${escapeHtml(name)}</label>` +
+              `<input type="text" id="${escapeHtml(name)}" name="${escapeHtml(name)}" value="${escapeHtml(value)}" required>`,
+          )
+          .join('') +
+        `<button type="submit">Save paths</button></form></div>`,
+    );
+  app.get('/paths', (request, response) => {
+    if (
+      pathSettings === undefined ||
+      pathToken === undefined ||
+      request.query.token !== pathToken
+    ) {
+      response.status(400).send(invalidTokenPage);
+      return;
+    }
+    try {
+      response.type('html').send(renderPaths(pathSettings.display()));
+    } catch (error) {
+      response.status(400).send(escapeHtml(String(error)));
+    }
+  });
+  app.post('/paths', (request, response) => {
+    if (
+      pathSettings === undefined ||
+      pathToken === undefined ||
+      readField(request.body, 'token') !== pathToken
+    ) {
+      response.status(400).send(invalidTokenPage);
+      return;
+    }
+    const body = request.body as Record<string, string>;
+    try {
+      pathSettings.save(body);
+      response
+        .type('html')
+        .send(
+          messageCard(
+            'Local paths',
+            'Paths saved',
+            'Restart a running server to use the new paths.',
+          ),
+        );
+    } catch (error) {
+      const values = Object.fromEntries(
+        Object.entries(body).filter(([key, value]) => key !== 'token' && typeof value === 'string'),
+      );
+      response
+        .status(400)
+        .type('html')
+        .send(renderPaths(values, error instanceof Error ? error.message : String(error)));
+    }
+  });
   return app;
 }

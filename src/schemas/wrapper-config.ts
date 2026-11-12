@@ -110,6 +110,20 @@ export const WrapperConfigSchema = z
     // No underscores in server names: `__` separates server and tool in the
     // namespaced tool names the wrapper exposes.
     servers: z.record(z.string().regex(/^[A-Za-z][A-Za-z0-9-]*$/), ChildServerSchema),
+    /** Local non-secret path settings. */
+    paths: z
+      .record(
+        z.string().regex(SECRET_NAME_PATTERN),
+        z
+          .object({
+            input: z.literal('path'),
+            kind: z.enum(['file', 'directory']),
+            default: z.string().min(1),
+            createParent: z.boolean().optional(),
+          })
+          .strict(),
+      )
+      .default({}),
     /** Optional per-secret metadata (description and input type for the form). */
     secrets: z.record(z.string().regex(SECRET_NAME_PATTERN), SecretMetaSchema).default({}),
   })
