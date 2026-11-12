@@ -1,5 +1,5 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WrapperConfigSchema } from '../schemas/wrapper-config.js';
 import { expandPaths, resolveStdioTemplates } from './placeholders.js';
@@ -55,8 +55,9 @@ describe('portable paths', () => {
     }).servers.test;
     if (server?.type !== 'stdio') throw new Error('wrong type');
     const resolved = resolveStdioTemplates(server, { TOKEN: 'secret' }, { SESSION: '/tmp/a' });
-    expect(resolved.args).toEqual(['/tmp/a', 'secret']);
-    expect(resolved.env.FILE).toBe('/tmp/a');
+    const expectedPath = '/tmp/a'.replaceAll('/', sep);
+    expect(resolved.args).toEqual([expectedPath, 'secret']);
+    expect(resolved.env.FILE).toBe(expectedPath);
     expect(resolved.cwd).toBeTruthy();
   });
   it('validates schema', () => {
