@@ -1,3 +1,4 @@
+import { homedir, tmpdir } from 'node:os';
 import {
   type ChildServerConfig,
   type InputType,
@@ -72,20 +73,25 @@ export function resolvePlaceholders(value: string, secrets: Record<string, strin
 export interface ResolvedStdioTemplates {
   args: string[];
   env: Record<string, string>;
+  cwd?: string;
 }
 
 export function resolveStdioTemplates(
   server: StdioServerConfig,
   secrets: Record<string, string>,
+  paths: Record<string, string> = {},
 ): ResolvedStdioTemplates {
+  const resolve = (value: string): string =>
+    resolvePlaceholders(expandPaths(value, paths), secrets);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(server.env)) {
-    env[key] = resolvePlaceholders(value, secrets);
+    env[key] = resolve(value);
   }
 
   return {
-    args: server.args.map((argument) => resolvePlaceholders(argument, secrets)),
+    args: server.args.map(resolve),
     env,
+    ...(server.cwd === undefined ? {} : { cwd: resolve(server.cwd) }),
   };
 }
 
@@ -105,4 +111,49 @@ export function resolveRemoteTemplates(
   }
 
   return { url: resolvePlaceholders(server.url, secrets), headers };
+}
+
+/** Expand only path expressions, leaving unrelated text and secret placeholders intact. */
+export function expandPaths(
+  value: string,
+  paths: Record<string, string> = {},
+  options: {
+    home?: string;
+    temp?: string;
+    env?: NodeJS.ProcessEnv;
+    platform?: NodeJS.Platform;
+  } = {},
+): string {
+  const platform = options.platform ?? process.platform;
+  const separator = platform === 'win32' ? '\\' : '/';
+  const normalize = (part: string): string => part.replace(/[\\/]/g, separator);
+  const home = options.home ?? homedir();
+  const env = options.env ?? process.env;
+  let expanded = value.replace(/^~(?=[\\/])/, normalize(home));
+  expanded = expanded.replace(
+    /\$\{(home|tmpdir|env:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?|path:([A-Za-z_][A-Za-z0-9_]*))\}/g,
+    (
+      _match,
+      expression: string,
+      name: string | undefined,
+      fallback: string | undefined,
+      pathName: string | undefined,
+    ) => {
+      let result: string | undefined;
+      if (expression === 'home') result = home;
+      else if (expression === 'tmpdir') result = options.temp ?? tmpdir();
+      else if (pathName !== undefined) {
+        result = paths[pathName];
+        if (result === undefined) throw new Error(`No path setting named '${pathName}'`);
+      } else if (name !== undefined) {
+        result = env[name];
+        if ((result === undefined || result === '') && fallback !== undefined) result = fallback;
+        if (result === undefined) throw new Error(`Environment variable '${name}' is not set`);
+      }
+      return normalize(result ?? '');
+    },
+  );
+  // Normalize separators adjacent to expanded paths without rewriting arbitrary arguments.
+  if (/^(?:~[\\/]|\$\{(?:home|tmpdir|env:|path:))/.test(value)) return normalize(expanded);
+  return expanded;
 }

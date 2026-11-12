@@ -16,6 +16,7 @@ import { resolveTheme } from './adapters/http/themes.js';
 import { loadOrCreateTls } from './adapters/http/tls.js';
 import { createMcpServer } from './adapters/mcp/create-mcp-server.js';
 import { createChildServerManager } from './application/child-server-manager.js';
+import { createPathSettings } from './application/path-settings.js';
 import { fetchGitConfig } from './application/git-config.js';
 import { watchParentProcess, watchStdinEof, type Watcher } from './application/lifecycle.js';
 import {
@@ -182,6 +183,12 @@ async function main(): Promise<void> {
   const wrapperConfig = loadWrapperConfig(configPath);
   const theme = resolveTheme(appConfig.theme ?? wrapperConfig.theme);
 
+  const pathSettings = createPathSettings(
+    wrapperConfig,
+    JSON.stringify(appConfig.configSource),
+    join(homedir(), '.mcp-secure-env-elicit', 'paths'),
+  );
+  const pathToken = randomUUID();
   const vault = createSecretVault();
 
   // Late binding: the secret service needs the MCP server (to elicit and to
@@ -225,6 +232,7 @@ async function main(): Promise<void> {
 
   const children = createChildServerManager({
     config: wrapperConfig,
+    pathSettings,
     vault,
     secretRequests,
     clientVersion: version,
@@ -233,7 +241,13 @@ async function main(): Promise<void> {
     },
   });
 
-  const httpApp = createHttpApp({ auth: secretRequests, theme, serviceVersion: version });
+  const httpApp = createHttpApp({
+    auth: secretRequests,
+    theme,
+    serviceVersion: version,
+    pathSettings,
+    pathToken,
+  });
   const server = createMcpServer({ children, version });
   mcp.server = server;
 
@@ -254,6 +268,12 @@ async function main(): Promise<void> {
   const httpServer = createHttpsServer({ key: tls.key, cert: tls.cert }, httpApp);
   const boundPort = await listen(httpServer, appConfig.host, appConfig.port);
   signInBaseUrl = `https://${appConfig.host}:${String(boundPort)}`;
+
+  if (Object.keys(wrapperConfig.paths).length > 0) {
+    process.stderr.write(
+      `[secure-env] local path settings: ${signInBaseUrl}/paths?token=${pathToken}\n`,
+    );
+  }
 
   // Disposed on shutdown so a watcher can never fire mid-teardown.
   const watchers: Watcher[] = [];

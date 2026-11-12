@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createPathSettings } from '../src/application/path-settings.js';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -74,6 +77,99 @@ describe('createChildServerManager', () => {
     ]);
   });
 
+  it('starts with the same default path in args and env after creating its parent', async () => {
+    const dir = mkdtempSync(join(process.cwd(), '.path-start-test-'));
+    const target = join(dir, 'parent', 'state.json');
+    const script = join(dir, 'child.mjs');
+    writeFileSync(
+      script,
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(process.env.FILE, JSON.stringify([process.argv[2], process.env.FILE]));\nawait import(${JSON.stringify(new URL('./fixtures/echo-server.mjs', import.meta.url).href)});`,
+    );
+    const config = WrapperConfigSchema.parse({
+      paths: { FILE: { input: 'path', kind: 'file', default: target, createParent: true } },
+      servers: {
+        echo: {
+          command: process.execPath,
+          args: [script, '${path:FILE}'],
+          env: { FILE: '${path:FILE}' },
+        },
+      },
+    });
+    const vault = createSecretVault();
+    const secretRequests = createSecretRequestService({
+      authBaseUrl: 'https://localhost',
+      client: {
+        supportsUrlElicitation: () => false,
+        elicitUrl: () => Promise.reject(new Error('unexpected prompt')),
+      },
+      vault,
+    });
+    manager = createChildServerManager({
+      config,
+      vault,
+      secretRequests,
+      pathSettings: createPathSettings(config, 'source', join(dir, 'settings')),
+    });
+    try {
+      expect((await manager.ensureStarted('echo')).ok).toBe(true);
+      expect(JSON.parse(readFileSync(target, 'utf8'))).toEqual([target, target]);
+    } finally {
+      await manager.stopAll();
+      manager = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not launch a child if creating the parent fails', async () => {
+    const dir = mkdtempSync(join(process.cwd(), '.path-failure-test-'));
+    const blocker = join(dir, 'blocker');
+    const marker = join(dir, 'started');
+    writeFileSync(blocker, 'file');
+    const config = WrapperConfigSchema.parse({
+      paths: {
+        FILE: {
+          input: 'path',
+          kind: 'file',
+          default: join(blocker, 'child', 'file'),
+          createParent: true,
+        },
+      },
+      servers: {
+        echo: {
+          command: process.execPath,
+          args: [
+            '-e',
+            `require('fs').writeFileSync(${JSON.stringify(marker)}, 'started')`,
+            '${path:FILE}',
+          ],
+        },
+      },
+    });
+    const vault = createSecretVault();
+    const secretRequests = createSecretRequestService({
+      authBaseUrl: 'https://localhost',
+      client: {
+        supportsUrlElicitation: () => false,
+        elicitUrl: () => Promise.reject(new Error('unexpected prompt')),
+      },
+      vault,
+    });
+    manager = createChildServerManager({
+      config,
+      vault,
+      secretRequests,
+      pathSettings: createPathSettings(config, 'source', join(dir, 'settings')),
+    });
+    try {
+      await expect(manager.ensureStarted('echo')).rejects.toThrow();
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await manager.stopAll();
+      manager = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('is idempotent for an already-running child', async () => {
     const vault = createSecretVault();
     vault.set('FIXTURE_SECRET', 'x');
@@ -117,7 +213,7 @@ describe('createChildServerManager', () => {
     expect(manager.listTools()).toEqual([]);
     expect(await manager.stop('echo')).toBe(false);
 
-    await expect(manager.callTool('echo__echo', {})).rejects.toThrow("not running");
+    await expect(manager.callTool('echo__echo', {})).rejects.toThrow('not running');
   });
 
   it('rejects unknown servers and malformed tool names', async () => {

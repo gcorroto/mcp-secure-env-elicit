@@ -268,3 +268,45 @@ npm run check   # lint + typecheck + tests + build
 ## License
 
 MIT
+
+### Local filesystem paths in shared configurations
+
+Declare non-secret paths under `paths` and use `${path:NAME}` in a stdio server's
+arguments, environment, or working directory. For example:
+
+```json
+{
+  "paths": {
+    "AYG_SESSION_FILE": {
+      "input": "path",
+      "kind": "file",
+      "default": "${home}/.ayg-sesiones/ayg-session.json",
+      "createParent": true
+    }
+  },
+  "servers": {
+    "ayg": {
+      "command": "ayg",
+      "args": ["--storage-state", "${path:AYG_SESSION_FILE}"],
+      "env": { "AYG_SESSION_FILE": "${path:AYG_SESSION_FILE}" }
+    }
+  }
+}
+```
+
+`kind` is `file` or `directory`; `createParent` creates the selected path's
+parent before starting a server that references it. Defaults and overrides must
+expand to absolute paths. A valid default is used without prompting. To change
+it, open the local path settings URL printed on startup; its text fields show
+expanded defaults or saved overrides. Changes apply when the child next starts.
+Overrides are stored unencrypted in `~/.mcp-secure-env-elicit/paths/`, scoped
+by configuration source. They are separate from the shared config and from the
+in-memory encrypted secret vault; do not use path settings for secrets.
+
+In stdio arguments, environment values and `cwd`, `${home}` and `${tmpdir}` use
+the wrapper user's home and temporary directories; leading `~/` expands to the
+home directory. `${env:NAME}` reads the wrapper process environment and fails
+startup if NAME is unset. `${env:NAME:-default}` uses the fallback when NAME is
+unset or empty. Path separators in expanded paths follow the local OS. These
+expressions also work in path defaults and overrides. Existing `${secure:NAME}`
+references continue to resolve independently.
