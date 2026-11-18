@@ -266,6 +266,13 @@ npm install
 npm run check   # lint + typecheck + tests + build
 ```
 
+## Releasing
+
+Patch releases happen automatically in CI on pushes to `main`.
+Run `npm run release:minor` for a minor release.
+Run `npm run release:major` for a major release.
+Packages are published to npm only from CI.
+
 ## License
 
 MIT
