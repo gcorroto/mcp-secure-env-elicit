@@ -8,7 +8,7 @@ As a maintainer, I want releases to be published exclusively by Jenkins, so that
 
 - GIVEN el repositorio de la librería
 - WHEN Jenkins carga el Jenkinsfile de la raíz
-- THEN el fichero contiene exactamente `@Library('jenkins-voip-reporter@main') _` y `publishNpmLibrary()` en líneas separadas
+- THEN el fichero contiene exactamente `@Library('jenkins-voip-reporter@main') _` y `publishNpmLibrary(nodeImage: 'node:22')` en líneas separadas
 
 #### Scenario: Patch automático
 
@@ -35,6 +35,6 @@ As a maintainer, I want releases to be published exclusively by Jenkins, so that
 
 - GIVEN el cambio preparado para revisión
 - WHEN se revisan el README y el paquete
-- THEN la sección «Releasing» explica en cuatro líneas el patch automático en CI, los comandos minor y major y la publicación exclusiva desde CI, sin describir el interior del pipeline
+- THEN la sección «Releasing» explica el patch automático en CI, los comandos minor y major, la publicación exclusiva desde CI y que CI usa `node:22` porque los tests necesitan `git`
 - AND el campo `version` conserva su valor anterior al cambio
 - AND `npm run check` termina correctamente

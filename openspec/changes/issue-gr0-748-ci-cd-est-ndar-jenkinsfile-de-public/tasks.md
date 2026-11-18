@@ -2,9 +2,9 @@
 
 ## 1. Configuración y documentación
 
-- [x] 1.1 Crear el `Jenkinsfile` raíz con las dos líneas exactas indicadas en GR0-748 (Scenario: Configuración del job).
+- [x] 1.1 Crear el `Jenkinsfile` raíz con la librería compartida y `publishNpmLibrary(nodeImage: 'node:22')` (Scenario: Configuración del job).
 - [x] 1.2 Añadir en `package.json` los cinco scripts `version:patch`, `version:minor`, `version:major`, `release:minor` y `release:major` exactamente como indica GR0-748; conservar los demás scripts y el campo `version` (Scenario: Preparación de minor o major; Scenario: Scripts de versión y publicación).
-- [x] 1.3 Añadir al README una sección «Releasing» de cuatro líneas que describa el estándar sin detalles internos del pipeline (Scenario: Documentación y verificación).
+- [x] 1.3 Añadir al README una sección «Releasing» que describa el estándar y la imagen de CI necesaria para los tests (Scenario: Documentación y verificación).
 
 ## 2. Verificación local
 

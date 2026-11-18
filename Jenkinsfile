@@ -1,2 +1,2 @@
 @Library('jenkins-voip-reporter@main') _
-publishNpmLibrary()
+publishNpmLibrary(nodeImage: 'node:22')
