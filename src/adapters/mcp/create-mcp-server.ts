@@ -102,7 +102,7 @@ export function createMcpServer({ children, version }: McpDependencies): Server 
     return { tools: [...managementTools, ...childTools] };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
     const { name, arguments: args } = request.params;
 
     try {
@@ -130,7 +130,21 @@ export function createMcpServer({ children, version }: McpDependencies): Server 
       }
 
       // Anything else must be a namespaced child tool.
-      return (await children.callTool(name, args)) as CallToolResult;
+      // The client's cancellation reaches the child, and the child's progress reaches the client (which
+      // also keeps the wrapper's own timeout from expiring while the tool reports it is alive).
+      const progressToken = request.params._meta?.progressToken;
+      return (await children.callTool(name, args, {
+        signal: extra.signal,
+        ...(progressToken === undefined
+          ? {}
+          : {
+              onProgress: (p) => {
+                void extra
+                  .sendNotification({ method: 'notifications/progress', params: { progressToken, ...p } })
+                  .catch(() => undefined);
+              },
+            }),
+      })) as CallToolResult;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       return textResult(message, true);

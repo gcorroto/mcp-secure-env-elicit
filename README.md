@@ -238,6 +238,7 @@ The sign-in page ships with several looks: `light` (default), `dark`, `ocean`, `
 | `--config-file <path>` | File inside the config repo when `--config` is a git URL and has no `#fragment`. |
 | `--theme <name>` / `MCP_SECURE_ENV_THEME` / `"theme"` | Sign-in page theme. |
 | `HOST` / `PORT` | Loopback server binding. Defaults `127.0.0.1:48910`. Keep the port stable for browser autofill. |
+| `MCP_SECURE_ENV_TOOL_TIMEOUT_MS` | How long a proxied tool call may run, in ms. Default `1800000` (30 min). Each progress notification from the child restarts it, up to twice the value in total. Your MCP client applies its own limit too (e.g. Claude Code's `MCP_TOOL_TIMEOUT`). |
 | `"servers"` (stdio) | `command`, `args`, `env` (with placeholders), optional `cwd`, optional `autoStart`. Server names cannot contain `_`. |
 | `"servers"` (remote) | `type` (`http`/`https`/`sse`), `url`, `headers` (with placeholders), optional `insecureTls`, optional `autoStart`. |
 | `"secrets"` | Optional per-secret `description` and `input`. |

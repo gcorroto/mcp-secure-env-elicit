@@ -18,6 +18,7 @@ import {
 } from '../schemas/wrapper-config.js';
 import { type PathSettings } from './path-settings.js';
 import { resolveInputType } from './input-type.js';
+import { DEFAULT_TOOL_TIMEOUT_MS, toolCallRequestOptions, type ToolCallOptions } from './tool-call-options.js';
 import {
   collectSecretReferences,
   resolveRemoteTemplates,
@@ -79,7 +80,7 @@ export interface ChildServerManager {
   /** Namespaced tools of every running child. */
   listTools: () => ChildToolInfo[];
   /** Forward a namespaced tool call to the owning child. */
-  callTool: (namespacedName: string, args: Record<string, unknown> | undefined) => Promise<unknown>;
+  callTool: (namespacedName: string, args: Record<string, unknown> | undefined, options?: ToolCallOptions) => Promise<unknown>;
 }
 
 export type ChildServerManagerDeps = Readonly<{
@@ -90,6 +91,8 @@ export type ChildServerManagerDeps = Readonly<{
   /** Invoked whenever the set of proxied tools changes (start/stop). */
   onToolsChanged?: () => void;
   clientVersion?: string;
+  /** How long a proxied tool call may run (default 30 min); see tool-call-options.ts. */
+  toolTimeoutMs?: number;
 }>;
 
 /** A connected child plus, for stdio children, the pid of its process tree. */
@@ -500,9 +503,12 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     return tools;
   };
 
+  const toolTimeoutMs = deps.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
+
   const callTool = async (
     namespacedName: string,
     args: Record<string, unknown> | undefined,
+    options?: ToolCallOptions,
   ): Promise<unknown> => {
     const separatorIndex = namespacedName.indexOf(TOOL_SEPARATOR);
     if (separatorIndex <= 0) {
@@ -520,7 +526,7 @@ export function createChildServerManager(deps: ChildServerManagerDeps): ChildSer
     }
 
     try {
-      return await entry.client.callTool({ name: toolName, arguments: args ?? {} });
+      return await entry.client.callTool({ name: toolName, arguments: args ?? {} }, undefined, toolCallRequestOptions(toolTimeoutMs, options));
     } catch (error: unknown) {
       // Mid-session transport errors can echo the request URL or upstream
       // response bodies; scrub the server's secret values before the message

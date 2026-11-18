@@ -16,6 +16,7 @@ import { resolveTheme } from './adapters/http/themes.js';
 import { loadOrCreateTls } from './adapters/http/tls.js';
 import { createMcpServer } from './adapters/mcp/create-mcp-server.js';
 import { createChildServerManager } from './application/child-server-manager.js';
+import { toolTimeoutFromEnv } from './application/tool-call-options.js';
 import { createPathSettings } from './application/path-settings.js';
 import { fetchGitConfig } from './application/git-config.js';
 import { watchParentProcess, watchStdinEof, type Watcher } from './application/lifecycle.js';
@@ -236,6 +237,7 @@ async function main(): Promise<void> {
     vault,
     secretRequests,
     clientVersion: version,
+    toolTimeoutMs: toolTimeoutFromEnv(process.env.MCP_SECURE_ENV_TOOL_TIMEOUT_MS),
     onToolsChanged: () => {
       void mcp.server?.sendToolListChanged().catch(() => undefined);
     },
